@@ -1,5 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
+import { getCurrentSession, loginWithEmail, logout } from "@/services/auth";
+import {
+  createClient as createClientInDb,
+  getClients,
+  softDeleteClient,
+  updateClient as updateClientInDb,
+  type ClientRow,
+} from "@/services/clients";
+import { createFolder as createFolderInDb, getFolders, softDeleteFolder, type FolderRow } from "@/services/folders";
+import { createNote as createNoteInDb, getNotes, softDeleteNote, type NoteRow } from "@/services/notes";
+import { getFiles, getSignedFileUrl, softDeleteFile, uploadClientFile, type FileRow } from "@/services/files";
 import {
   ArrowLeft,
   BriefcaseBusiness,
@@ -31,6 +42,7 @@ type StoredFile = {
   type?: string;
   size?: number;
   dataUrl?: string;
+  storagePath?: string;
 };
 
 type FolderItem = {
@@ -70,10 +82,7 @@ const OLD_STORAGE_KEYS = [
   "tj-organization-clients-v3",
   "tj-organization-clients",
 ];
-const AUTH_EMAIL = "tjylaw@site.com";
-const AUTH_PASSWORD = "Lukedrew1";
-const AUTH_STORAGE_KEY = "tj-organization-auth-v1";
-const AUTH_DURATION_MS = 7 * 24 * 60 * 60 * 1000;
+
 
 const emptyClientForm: ClientForm = {
   firstName: "",
@@ -100,13 +109,28 @@ const clientName = (client: Client) => {
   return last || first || "Untitled Client";
 };
 
-const formatDate = (date: string) =>
-  new Intl.DateTimeFormat("en", {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(date));
+const formatDate = (date: string) => {
+  if (!date) return "—";
+
+  const [year, month, day] = date.split("-");
+  if (!year || !month || !day) return date;
+
+  return `${month}/${day}/${year}`;
+};
+
+const fileSizeLabel = (size?: number) => {
+  if (!size) return "Size unknown";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+const fileTypeLabel = (file: StoredFile) => {
+  if (file.type?.includes("pdf") || file.name.toLowerCase().endsWith(".pdf")) return "PDF";
+  if (file.type?.startsWith("image/")) return "Image";
+  if (file.type?.startsWith("text/")) return "Text";
+  return file.name.split(".").pop()?.toUpperCase() || "File";
+};
 
 const sortClients = (clients: Client[]) =>
   [...clients].sort((a, b) => {
@@ -115,14 +139,84 @@ const sortClients = (clients: Client[]) =>
     return (a.firstName || "").localeCompare(b.firstName || "");
   });
 
-const cleanFolder = (folder: any): FolderItem => {
+
+const clientFromRow = (row: ClientRow): Client => ({
+  id: row.id,
+  firstName: row.first_name || "",
+  lastName: row.last_name || "",
+  phoneNumber: row.phone_number || "",
+  email: row.email || "",
+  dateOfBirth: row.date_of_birth || "",
+  dateOfIncident: row.date_of_incident || "",
+  ssn: row.ssn || "",
+  caseType: row.case_type || "",
+  folders: [],
+  extraFiles: [],
+  notes: [],
+});
+
+const storedFileFromRow = (row: FileRow): StoredFile => ({
+  id: row.id,
+  name: row.name,
+  uploadedAt: row.created_at,
+  type: row.file_type || undefined,
+  size: row.file_size || undefined,
+  storagePath: row.storage_path,
+});
+
+const buildClientsFromRows = (
+  clientRows: ClientRow[],
+  folderRows: FolderRow[],
+  noteRows: NoteRow[],
+  fileRows: FileRow[],
+): Client[] => {
+  const clientsById = new Map<string, Client>();
+
+  clientRows.forEach((row) => {
+    clientsById.set(row.id, clientFromRow(row));
+  });
+
+  folderRows.forEach((row) => {
+    const client = clientsById.get(row.client_id);
+    if (!client) return;
+    client.folders.push({ id: row.id, name: row.name, files: [] });
+  });
+
+  noteRows.forEach((row) => {
+    const client = clientsById.get(row.client_id);
+    if (!client) return;
+    client.notes.push({ id: row.id, text: row.content, createdAt: row.created_at });
+  });
+
+  fileRows.forEach((row) => {
+    const client = clientsById.get(row.client_id);
+    if (!client) return;
+    const file = storedFileFromRow(row);
+    if (row.is_extra_file || !row.folder_id) {
+      client.extraFiles.push(file);
+      return;
+    }
+    const folder = client.folders.find((item) => item.id === row.folder_id);
+    if (folder) folder.files.push(file);
+  });
+
+  return sortClients(Array.from(clientsById.values()));
+};
+
+const cleanFolder = (folder: unknown): FolderItem => {
   if (typeof folder === "string")
     return { id: newId(), name: folder, files: [] };
-  return {
-    id: folder?.id || newId(),
-    name: folder?.name || "Untitled Folder",
-    files: Array.isArray(folder?.files) ? folder.files : [],
-  };
+
+  if (folder && typeof folder === "object") {
+    const value = folder as Partial<FolderItem>;
+    return {
+      id: value.id || newId(),
+      name: value.name || "Untitled Folder",
+      files: Array.isArray(value.files) ? value.files : [],
+    };
+  }
+
+  return { id: newId(), name: "Untitled Folder", files: [] };
 };
 
 const cleanClient = (client: Partial<Client>): Client => ({
@@ -156,34 +250,44 @@ export default function Home() {
   const [noteText, setNoteText] = useState("");
   const [previewFile, setPreviewFile] = useState<StoredFile | null>(null);
   const [editingClientId, setEditingClientId] = useState<string | null>(null);
+  const [isDataLoading, setIsDataLoading] = useState(false);
+  const [appError, setAppError] = useState("");
 
-  useEffect(() => {
-    const saved =
-      localStorage.getItem(STORAGE_KEY) ||
-      OLD_STORAGE_KEYS.map((key) => localStorage.getItem(key)).find(Boolean);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) setClients(parsed.map(cleanClient));
-      } catch {
-        setClients([]);
-      }
+  const loadWorkspace = async () => {
+    setIsDataLoading(true);
+    setAppError("");
+    const [clientResult, folderResult, noteResult, fileResult] = await Promise.all([
+      getClients(),
+      getFolders(),
+      getNotes(),
+      getFiles(),
+    ]);
+
+    const firstError = clientResult.error || folderResult.error || noteResult.error || fileResult.error;
+    if (firstError) {
+      setAppError(firstError.message || "Could not load workspace data.");
+      setIsDataLoading(false);
+      return;
     }
-  }, []);
+
+    setClients(buildClientsFromRows(
+      clientResult.data || [],
+      folderResult.data || [],
+      noteResult.data || [],
+      fileResult.data || [],
+    ));
+    setIsDataLoading(false);
+  };
 
   useEffect(() => {
-    try {
-      const savedAuth = localStorage.getItem(AUTH_STORAGE_KEY);
-      if (!savedAuth) return;
-      const parsed = JSON.parse(savedAuth);
-      if (parsed?.expiresAt && Date.now() < parsed.expiresAt) {
+    const checkSession = async () => {
+      const { data } = await getCurrentSession();
+      if (data.session) {
         setIsLoggedIn(true);
-      } else {
-        localStorage.removeItem(AUTH_STORAGE_KEY);
+        await loadWorkspace();
       }
-    } catch {
-      localStorage.removeItem(AUTH_STORAGE_KEY);
-    }
+    };
+    checkSession();
   }, []);
 
   useEffect(() => {
@@ -235,9 +339,6 @@ export default function Home() {
     return () => window.removeEventListener("popstate", handleBrowserBack);
   }, []);
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(clients));
-  }, [clients]);
 
   const sortedClients = useMemo(() => sortClients(clients), [clients]);
   const filteredClients = useMemo(() => {
@@ -325,25 +426,40 @@ export default function Home() {
     setAppView("folder-file", selectedClientId, folderId);
   };
 
-  const handleLogin = () => {
-    if (
-      loginEmail.trim().toLowerCase() === AUTH_EMAIL &&
-      loginPassword === AUTH_PASSWORD
-    ) {
-      localStorage.setItem(
-        AUTH_STORAGE_KEY,
-        JSON.stringify({ expiresAt: Date.now() + AUTH_DURATION_MS }),
-      );
-      setIsLoggedIn(true);
-      setLoginError("");
-      setLoginEmail("");
-      setLoginPassword("");
+  const handleLogin = async () => {
+  setLoginError("");
+
+  const { error } = await loginWithEmail(
+    loginEmail.trim().toLowerCase(),
+    loginPassword
+  );
+
+  if (error) {
+    setLoginError("Wrong email or password.");
+    return;
+  }
+
+  setIsLoggedIn(true);
+  await loadWorkspace();
+  setLoginEmail("");
+  setLoginPassword("");
+};
+
+  const handlePreviewFile = async (file: StoredFile) => {
+    if (file.storagePath && !file.dataUrl) {
+      const { data, error } = await getSignedFileUrl(file.storagePath);
+      if (error || !data?.signedUrl) {
+        setAppError(error?.message || "Could not open file preview.");
+        return;
+      }
+      setPreviewFile({ ...file, dataUrl: data.signedUrl });
       return;
     }
-    setLoginError("Wrong email or password.");
+    setPreviewFile(file);
   };
 
-  const addClient = () => {
+  const addClient = async () => {
+    setAppError("");
     const cleanedForm = {
       firstName: clientForm.firstName.trim(),
       lastName: clientForm.lastName.trim(),
@@ -355,14 +471,30 @@ export default function Home() {
       caseType: clientForm.caseType.trim(),
     };
 
+    const dbInput = {
+      first_name: cleanedForm.firstName,
+      last_name: cleanedForm.lastName,
+      phone_number: cleanedForm.phoneNumber,
+      email: cleanedForm.email,
+      date_of_birth: cleanedForm.dateOfBirth,
+      date_of_incident: cleanedForm.dateOfIncident,
+      ssn: cleanedForm.ssn,
+      case_type: cleanedForm.caseType,
+    };
+
     if (editingClientId) {
-      setClients((current) =>
-        sortClients(
-          current.map((client) =>
-            client.id === editingClientId ? { ...client, ...cleanedForm } : client,
-          ),
-        ),
-      );
+      const { data, error } = await updateClientInDb(editingClientId, dbInput);
+      if (error) {
+        setAppError(error.message || "Could not save client changes.");
+        return;
+      }
+      if (data) {
+        setClients((current) =>
+          sortClients(current.map((client) =>
+            client.id === editingClientId ? { ...client, ...clientFromRow(data as ClientRow) } : client,
+          )),
+        );
+      }
       const clientToOpen = editingClientId;
       setClientForm(emptyClientForm);
       setEditingClientId(null);
@@ -370,9 +502,14 @@ export default function Home() {
       return;
     }
 
+    const { data, error } = await createClientInDb(dbInput);
+    if (error || !data) {
+      setAppError(error?.message || "Could not create client.");
+      return;
+    }
+
     const client: Client = {
-      id: newId(),
-      ...cleanedForm,
+      ...clientFromRow(data as ClientRow),
       folders: [],
       extraFiles: [],
       notes: [],
@@ -398,22 +535,28 @@ export default function Home() {
     setAppView("add-client", client.id, null);
   };
 
-  const deleteClient = (clientId: string) => {
+  const deleteClient = async (clientId: string) => {
     const client = clients.find((item) => item.id === clientId);
     if (!client) return;
     if (!window.confirm(`Delete ${clientName(client)}? This cannot be undone.`))
       return;
+    const { error } = await softDeleteClient(clientId);
+    if (error) {
+      setAppError(error.message || "Could not delete client.");
+      return;
+    }
     setClients((current) => current.filter((item) => item.id !== clientId));
     if (selectedClientId === clientId) goHome();
   };
 
-  const addFolder = () => {
+  const addFolder = async () => {
     if (!selectedClient || !folderName.trim()) return;
-    const folder: FolderItem = {
-      id: newId(),
-      name: folderName.trim(),
-      files: [],
-    };
+    const { data, error } = await createFolderInDb({ client_id: selectedClient.id, name: folderName.trim() });
+    if (error || !data) {
+      setAppError(error?.message || "Could not create folder.");
+      return;
+    }
+    const folder: FolderItem = { id: data.id, name: data.name, files: [] };
     setClients((current) =>
       current.map((client) =>
         client.id === selectedClient.id
@@ -425,10 +568,15 @@ export default function Home() {
     setIsFolderModalOpen(false);
   };
 
-  const deleteFolder = (folderId: string) => {
+  const deleteFolder = async (folderId: string) => {
     if (!selectedClient) return;
     if (!window.confirm("Delete this folder and its uploaded file list?"))
       return;
+    const { error } = await softDeleteFolder(folderId);
+    if (error) {
+      setAppError(error.message || "Could not delete folder.");
+      return;
+    }
     setClients((current) =>
       current.map((client) =>
         client.id === selectedClient.id
@@ -474,7 +622,22 @@ export default function Home() {
 
   const addFilesToFolder = async (files: FileList | null) => {
     if (!selectedClient || !selectedFolder || !files?.length) return;
-    const newFiles = await readUploadedFiles(files);
+    setAppError("");
+    const uploaded: StoredFile[] = [];
+    for (const file of Array.from(files)) {
+      const { data, error } = await uploadClientFile({
+        clientId: selectedClient.id,
+        folderId: selectedFolder.id,
+        file,
+        isExtraFile: false,
+      });
+      if (error || !data) {
+        setAppError(error?.message || `Could not upload ${file.name}.`);
+        continue;
+      }
+      uploaded.push(storedFileFromRow(data as FileRow));
+    }
+    if (uploaded.length === 0) return;
     setClients((current) =>
       current.map((client) =>
         client.id === selectedClient.id
@@ -482,7 +645,7 @@ export default function Home() {
               ...client,
               folders: client.folders.map((folder) =>
                 folder.id === selectedFolder.id
-                  ? { ...folder, files: [...newFiles, ...folder.files] }
+                  ? { ...folder, files: [...uploaded, ...folder.files] }
                   : folder,
               ),
             }
@@ -493,18 +656,37 @@ export default function Home() {
 
   const addExtraFiles = async (files: FileList | null) => {
     if (!selectedClient || !files?.length) return;
-    const newFiles = await readUploadedFiles(files);
+    setAppError("");
+    const uploaded: StoredFile[] = [];
+    for (const file of Array.from(files)) {
+      const { data, error } = await uploadClientFile({
+        clientId: selectedClient.id,
+        file,
+        isExtraFile: true,
+      });
+      if (error || !data) {
+        setAppError(error?.message || `Could not upload ${file.name}.`);
+        continue;
+      }
+      uploaded.push(storedFileFromRow(data as FileRow));
+    }
+    if (uploaded.length === 0) return;
     setClients((current) =>
       current.map((client) =>
         client.id === selectedClient.id
-          ? { ...client, extraFiles: [...newFiles, ...client.extraFiles] }
+          ? { ...client, extraFiles: [...uploaded, ...client.extraFiles] }
           : client,
       ),
     );
   };
 
-  const deleteFolderFile = (fileId: string) => {
+  const deleteFolderFile = async (fileId: string) => {
     if (!selectedClient || !selectedFolder) return;
+    const { error } = await softDeleteFile(fileId);
+    if (error) {
+      setAppError(error.message || "Could not delete file.");
+      return;
+    }
     setClients((current) =>
       current.map((client) =>
         client.id === selectedClient.id
@@ -524,8 +706,13 @@ export default function Home() {
     );
   };
 
-  const deleteExtraFile = (fileId: string) => {
+  const deleteExtraFile = async (fileId: string) => {
     if (!selectedClient) return;
+    const { error } = await softDeleteFile(fileId);
+    if (error) {
+      setAppError(error.message || "Could not delete file.");
+      return;
+    }
     setClients((current) =>
       current.map((client) =>
         client.id === selectedClient.id
@@ -540,13 +727,14 @@ export default function Home() {
     );
   };
 
-  const addNote = () => {
+  const addNote = async () => {
     if (!selectedClient || !noteText.trim()) return;
-    const note: Note = {
-      id: newId(),
-      text: noteText.trim(),
-      createdAt: new Date().toISOString(),
-    };
+    const { data, error } = await createNoteInDb({ client_id: selectedClient.id, content: noteText.trim() });
+    if (error || !data) {
+      setAppError(error?.message || "Could not add note.");
+      return;
+    }
+    const note: Note = { id: data.id, text: data.content, createdAt: data.created_at };
     setClients((current) =>
       current.map((client) =>
         client.id === selectedClient.id
@@ -557,8 +745,13 @@ export default function Home() {
     setNoteText("");
   };
 
-  const deleteNote = (noteId: string) => {
+  const deleteNote = async (noteId: string) => {
     if (!selectedClient) return;
+    const { error } = await softDeleteNote(noteId);
+    if (error) {
+      setAppError(error.message || "Could not delete note.");
+      return;
+    }
     setClients((current) =>
       current.map((client) =>
         client.id === selectedClient.id
@@ -628,8 +821,7 @@ export default function Home() {
             </button>
           </div>
           <p className="mt-6 text-center text-sm text-slate-500">
-            Testing login only. Real private auth/database should be added
-            before real client files.
+            Private office login powered by Supabase.
           </p>
         </motion.section>
       </main>
@@ -659,11 +851,12 @@ export default function Home() {
               Home
             </button>
             <button
-              onClick={() => {
-                localStorage.removeItem(AUTH_STORAGE_KEY);
-                setIsLoggedIn(false);
-                setAppView("home", null, null, "replace");
-              }}
+              onClick={async () => {
+  await logout();
+  setIsLoggedIn(false);
+  setClients([]);
+  setAppView("home", null, null, "replace");
+}}
               className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2 font-bold text-slate-600 hover:border-slate-300 hover:text-slate-950"
             >
               <LogOut className="h-4 w-4" /> Log Out
@@ -673,6 +866,16 @@ export default function Home() {
       </header>
 
       <div className="mx-auto max-w-7xl px-5 py-6">
+        {appError && (
+          <div className="mb-5 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700">
+            {appError}
+          </div>
+        )}
+        {isDataLoading && (
+          <div className="mb-5 rounded-2xl border border-blue-100 bg-blue-50 px-4 py-3 text-sm font-bold text-blue-700">
+            Loading secure office data...
+          </div>
+        )}
         {view === "home" && (
           <motion.section
             initial={{ opacity: 0, y: 14 }}
@@ -742,7 +945,7 @@ export default function Home() {
                     <p className="text-sm text-slate-500">
                       Incident:{" "}
                       <span className="font-bold text-slate-700">
-                        {displayValue(client.dateOfIncident)}
+                        {formatDate(client.dateOfIncident)}
                       </span>
                     </p>
                     <p className="text-sm text-slate-500">
@@ -890,6 +1093,7 @@ export default function Home() {
             selectedFolder={selectedFolder}
             setAppView={setAppView}
             startEditClient={startEditClient}
+            showNotes
           >
             <section className="space-y-6">
               <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -961,7 +1165,7 @@ export default function Home() {
                   files={selectedClient.extraFiles}
                   emptyText="No extra files yet."
                   onDelete={deleteExtraFile}
-                  onPreview={setPreviewFile}
+                  onPreview={handlePreviewFile}
                 />
               </div>
             </section>
@@ -980,6 +1184,7 @@ export default function Home() {
             selectedFolder={selectedFolder}
             setAppView={setAppView}
             startEditClient={startEditClient}
+            showNotes={false}
           >
             <section className="space-y-6">
               <button
@@ -1011,7 +1216,7 @@ export default function Home() {
                   files={selectedFolder.files}
                   emptyText="No files uploaded in this folder yet."
                   onDelete={deleteFolderFile}
-                  onPreview={setPreviewFile}
+                  onPreview={handlePreviewFile}
                 />
               </div>
             </section>
@@ -1120,6 +1325,7 @@ function ClientShell({
   setNoteText,
   addNote,
   deleteNote,
+  showNotes = true,
   children,
 }: {
   selectedClient: Client;
@@ -1132,6 +1338,7 @@ function ClientShell({
   setNoteText: (value: string) => void;
   addNote: () => void;
   deleteNote: (noteId: string) => void;
+  showNotes?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -1186,12 +1393,12 @@ function ClientShell({
           <InfoCard
             icon={<CalendarDays className="h-4 w-4" />}
             label="Date of Birth"
-            value={selectedClient.dateOfBirth}
+           value={formatDate(selectedClient.dateOfBirth)}
           />
           <InfoCard
             icon={<CalendarDays className="h-4 w-4" />}
             label="Date of Incident"
-            value={selectedClient.dateOfIncident}
+            value={formatDate(selectedClient.dateOfIncident)}
           />
           <InfoCard label="SSN" value={selectedClient.ssn} />
           <InfoCard
@@ -1204,15 +1411,17 @@ function ClientShell({
           />
         </div>
       </div>
-      <div className="grid gap-6 xl:grid-cols-[1fr_390px]">
+      <div className={showNotes ? "grid gap-6 xl:grid-cols-[1fr_390px]" : "grid gap-6"}>
         {children}
-        <StickyNotes
-          selectedClient={selectedClient}
-          noteText={noteText}
-          setNoteText={setNoteText}
-          addNote={addNote}
-          deleteNote={deleteNote}
-        />
+        {showNotes && (
+          <StickyNotes
+            selectedClient={selectedClient}
+            noteText={noteText}
+            setNoteText={setNoteText}
+            addNote={addNote}
+            deleteNote={deleteNote}
+          />
+        )}
       </div>
     </motion.section>
   );
@@ -1400,10 +1609,11 @@ function FileList({
         {emptyText}
       </div>
     );
+
   return (
-    <div className="grid gap-2 md:grid-cols-2">
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
       {files.map((file) => (
-        <div
+        <article
           key={file.id}
           role="button"
           tabIndex={0}
@@ -1411,50 +1621,101 @@ function FileList({
           onKeyDown={(event) => {
             if (event.key === "Enter" || event.key === " ") onPreview(file);
           }}
-          className="group cursor-pointer rounded-xl border border-slate-200 bg-white p-2 transition hover:border-blue-200 hover:bg-blue-50/30"
+          className="group overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-blue-200"
         >
-          <div className="flex w-full items-center gap-3 text-left">
-            <FileThumb file={file} />
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-black group-hover:text-blue-700">
-                {file.name}
-              </p>
-              <p className="text-[10px] font-bold uppercase tracking-[0.14em] text-slate-400">
+          <FileThumb file={file} />
+          <div className="p-3">
+            <div className="mb-2 flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-black text-slate-950 group-hover:text-blue-700">
+                  {file.name}
+                </p>
+                <p className="mt-1 text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">
+                  {fileTypeLabel(file)} • {fileSizeLabel(file.size)}
+                </p>
+              </div>
+              <span className="rounded-lg bg-blue-50 px-2 py-1 text-[10px] font-black text-blue-700">
+                {fileTypeLabel(file)}
+              </span>
+            </div>
+            <div className="flex items-center justify-between border-t border-slate-100 pt-2">
+              <p className="text-xs font-bold text-slate-400">
                 {formatDate(file.uploadedAt)}
               </p>
+              <button
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onDelete(file.id);
+                }}
+                className="rounded-lg px-2 py-1 text-xs font-black text-slate-300 hover:bg-red-50 hover:text-red-600"
+              >
+                Delete
+              </button>
             </div>
           </div>
-          <div className="mt-2 flex justify-end border-t border-slate-100 pt-2">
-            <button
-              onClick={(event) => {
-                event.stopPropagation();
-                onDelete(file.id);
-              }}
-              className="rounded-lg px-2 py-1 text-xs font-black text-slate-300 hover:bg-red-50 hover:text-red-600"
-            >
-              Delete
-            </button>
-          </div>
-        </div>
+        </article>
       ))}
     </div>
   );
 }
 
 function FileThumb({ file }: { file: StoredFile }) {
-  if (file.dataUrl && file.type?.startsWith("image/")) {
+  const [thumbUrl, setThumbUrl] = useState(file.dataUrl || "");
+  const isImage = file.type?.startsWith("image/");
+  const isPdf = file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+
+  useEffect(() => {
+    let active = true;
+    if (file.dataUrl) {
+      setThumbUrl(file.dataUrl);
+      return;
+    }
+    if (!file.storagePath || (!isPdf && !isImage)) return;
+
+    getSignedFileUrl(file.storagePath).then(({ data }) => {
+      if (active && data?.signedUrl) setThumbUrl(data.signedUrl);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [file.dataUrl, file.storagePath, isPdf, isImage]);
+
+  if (isImage && thumbUrl) {
     return (
-      <img
-        src={file.dataUrl}
-        alt=""
-        className="h-14 w-14 rounded-lg border border-slate-200 object-cover"
-      />
+      <div className="h-44 overflow-hidden bg-slate-100">
+        <img
+          src={thumbUrl}
+          alt=""
+          className="h-full w-full object-cover transition duration-300 group-hover:scale-[1.02]"
+        />
+      </div>
+    );
+  }
+
+  if (isPdf && thumbUrl) {
+    return (
+      <div className="relative h-44 overflow-hidden bg-slate-100">
+        <iframe
+          src={`${thumbUrl}#page=1&view=FitH&toolbar=0&navpanes=0&scrollbar=0`}
+          title={`${file.name} preview`}
+          className="pointer-events-none h-[230px] w-full origin-top scale-[0.88] border-0 bg-white"
+        />
+        <div className="absolute left-3 top-3 rounded-md bg-red-600 px-2 py-1 text-[10px] font-black text-white shadow-sm">
+          PDF
+        </div>
+      </div>
     );
   }
 
   return (
-    <div className="flex h-14 w-14 items-center justify-center rounded-lg border border-slate-200 bg-blue-50 text-blue-700">
-      <FileUp className="h-5 w-5" />
+    <div className="flex h-44 flex-col items-center justify-center bg-slate-50 text-blue-700">
+      <div className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
+        <FileUp className="h-8 w-8" />
+      </div>
+      <p className="mt-3 text-xs font-black uppercase tracking-[0.14em] text-slate-400">
+        {fileTypeLabel(file)} File
+      </p>
     </div>
   );
 }
