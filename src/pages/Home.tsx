@@ -120,10 +120,14 @@ const clientName = (client: Client) => {
 const formatDate = (date: string) => {
   if (!date) return "—";
 
-  const [year, month, day] = date.split("-");
-  if (!year || !month || !day) return date;
+  const parsedDate = new Date(date);
+  if (Number.isNaN(parsedDate.getTime())) return date;
 
-  return `${month}/${day}/${year}`;
+  return parsedDate.toLocaleDateString("en-US", {
+    month: "2-digit",
+    day: "2-digit",
+    year: "numeric",
+  });
 };
 
 const fileSizeLabel = (size?: number) => {
@@ -546,8 +550,10 @@ export default function Home() {
   const deleteClient = async (clientId: string) => {
     const client = clients.find((item) => item.id === clientId);
     if (!client) return;
-    if (!window.confirm(`Delete ${clientName(client)}? This cannot be undone.`))
-      return;
+    const confirmed = window.confirm(
+      `Delete ${clientName(client)}?\n\nThis client file will be removed.`,
+    );
+    if (!confirmed) return;
     const { error } = await softDeleteClient(clientId);
     if (error) {
       setAppError(error.message || "Could not delete client.");
@@ -578,8 +584,16 @@ export default function Home() {
 
   const deleteFolder = async (folderId: string) => {
     if (!selectedClient) return;
-    if (!window.confirm("Delete this folder and its uploaded file list?"))
-      return;
+
+    const folder = selectedClient.folders.find((item) => item.id === folderId);
+    if (!folder) return;
+
+    const confirmed = window.confirm(
+      `Delete "${folder.name}"?\n\nThe folder and its file list will be removed.`,
+    );
+
+    if (!confirmed) return;
+
     const { error } = await softDeleteFolder(folderId);
     if (error) {
       setAppError(error.message || "Could not delete folder.");
@@ -697,81 +711,137 @@ const renameFile = async (fileId: string, currentName: string) => {
 
   if (!trimmedName || trimmedName === currentName) return;
 
-  const { data, error } = await renameFileInDb(fileId, trimmedName);
+  setAppError("");
 
-  if (error || !data) {
-    setAppError(error?.message || "Could not rename file.");
+  const { error } = await renameFileInDb(fileId, trimmedName);
+
+  if (error) {
+    setAppError(error.message || "Could not rename file.");
     return;
   }
 
   setClients((current) =>
     current.map((client) => ({
       ...client,
+
       extraFiles: client.extraFiles.map((file) =>
-        file.id === fileId ? { ...file, name: data.name } : file,
+        file.id === fileId
+          ? { ...file, name: trimmedName }
+          : file,
       ),
+
       folders: client.folders.map((folder) => ({
         ...folder,
+
         files: folder.files.map((file) =>
-          file.id === fileId ? { ...file, name: data.name } : file,
+          file.id === fileId
+            ? { ...file, name: trimmedName }
+            : file,
         ),
       })),
     })),
   );
 
+  setPreviewFile((current) =>
+    current?.id === fileId
+      ? { ...current, name: trimmedName }
+      : current,
+  );
+};
+
+const deleteFolderFile = async (fileId: string) => {
+  if (!selectedClient || !selectedFolder) return;
+
+  const file = selectedFolder.files.find(
+    (item) => item.id === fileId,
+  );
+
+  if (!file) return;
+
+  const confirmed = window.confirm(
+    `Are you sure you want to delete "${file.name}"?`,
+  );
+
+  if (!confirmed) return;
+
+  setAppError("");
+
+  const { error } = await softDeleteFile(fileId);
+
+  if (error) {
+    setAppError(error.message || "Could not delete file.");
+    return;
+  }
+
+  setClients((current) =>
+    current.map((client) =>
+      client.id === selectedClient.id
+        ? {
+            ...client,
+
+            folders: client.folders.map((folder) =>
+              folder.id === selectedFolder.id
+                ? {
+                    ...folder,
+
+                    files: folder.files.filter(
+                      (item) => item.id !== fileId,
+                    ),
+                  }
+                : folder,
+            ),
+          }
+        : client,
+    ),
+  );
+
   if (previewFile?.id === fileId) {
-    setPreviewFile((current) =>
-      current ? { ...current, name: data.name } : null,
-    );
+    setPreviewFile(null);
   }
 };
 
-  const deleteFolderFile = async (fileId: string) => {
-    if (!selectedClient || !selectedFolder) return;
-    const { error } = await softDeleteFile(fileId);
-    if (error) {
-      setAppError(error.message || "Could not delete file.");
-      return;
-    }
-    setClients((current) =>
-      current.map((client) =>
-        client.id === selectedClient.id
-          ? {
-              ...client,
-              folders: client.folders.map((folder) =>
-                folder.id === selectedFolder.id
-                  ? {
-                      ...folder,
-                      files: folder.files.filter((file) => file.id !== fileId),
-                    }
-                  : folder,
-              ),
-            }
-          : client,
-      ),
-    );
-  };
-
   const deleteExtraFile = async (fileId: string) => {
-    if (!selectedClient) return;
-    const { error } = await softDeleteFile(fileId);
-    if (error) {
-      setAppError(error.message || "Could not delete file.");
-      return;
-    }
-    setClients((current) =>
-      current.map((client) =>
-        client.id === selectedClient.id
-          ? {
-              ...client,
-              extraFiles: client.extraFiles.filter(
-                (file) => file.id !== fileId,
-              ),
-            }
-          : client,
-      ),
-    );
-  };
+  if (!selectedClient) return;
+
+  const file = selectedClient.extraFiles.find(
+    (item) => item.id === fileId,
+  );
+
+  if (!file) return;
+
+  const confirmed = window.confirm(
+    `Are you sure you want to delete "${file.name}"?`,
+  );
+
+  if (!confirmed) return;
+
+  setAppError("");
+
+  const { error } = await softDeleteFile(fileId);
+
+  if (error) {
+    setAppError(error.message || "Could not delete file.");
+    return;
+  }
+
+  setClients((current) =>
+    current.map((client) =>
+      client.id === selectedClient.id
+        ? {
+            ...client,
+
+            extraFiles: client.extraFiles.filter(
+              (item) => item.id !== fileId,
+            ),
+          }
+        : client,
+    ),
+  );
+
+  if (previewFile?.id === fileId) {
+    setPreviewFile(null);
+  }
+};
 
   const addNote = async () => {
     if (!selectedClient || !noteText.trim()) return;
@@ -792,23 +862,43 @@ const renameFile = async (fileId: string, currentName: string) => {
   };
 
   const deleteNote = async (noteId: string) => {
-    if (!selectedClient) return;
-    const { error } = await softDeleteNote(noteId);
-    if (error) {
-      setAppError(error.message || "Could not delete note.");
-      return;
-    }
-    setClients((current) =>
-      current.map((client) =>
-        client.id === selectedClient.id
-          ? {
-              ...client,
-              notes: client.notes.filter((note) => note.id !== noteId),
-            }
-          : client,
-      ),
-    );
-  };
+  if (!selectedClient) return;
+
+  const note = selectedClient.notes.find(
+    (item) => item.id === noteId,
+  );
+
+  if (!note) return;
+
+  const confirmed = window.confirm(
+    "Are you sure you want to delete this sticky note?",
+  );
+
+  if (!confirmed) return;
+
+  setAppError("");
+
+  const { error } = await softDeleteNote(noteId);
+
+  if (error) {
+    setAppError(error.message || "Could not delete note.");
+    return;
+  }
+
+  setClients((current) =>
+    current.map((client) =>
+      client.id === selectedClient.id
+        ? {
+            ...client,
+
+            notes: client.notes.filter(
+              (item) => item.id !== noteId,
+            ),
+          }
+        : client,
+    ),
+  );
+};
 
   if (!isLoggedIn) {
     return (
@@ -1211,6 +1301,7 @@ const renameFile = async (fileId: string, currentName: string) => {
                   files={selectedClient.extraFiles}
                   emptyText="No extra files yet."
                   onDelete={deleteExtraFile}
+                  onRename={renameFile}
                   onPreview={handlePreviewFile}
                 />
               </div>
@@ -1262,6 +1353,7 @@ const renameFile = async (fileId: string, currentName: string) => {
                   files={selectedFolder.files}
                   emptyText="No files uploaded in this folder yet."
                   onDelete={deleteFolderFile}
+                  onRename={renameFile}
                   onPreview={handlePreviewFile}
                 />
               </div>
