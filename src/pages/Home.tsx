@@ -35,6 +35,7 @@ import {
   Phone,
   Plus,
   Search,
+  Clock3,
   ShieldAlert,
   ShieldCheck,
   StickyNote,
@@ -65,6 +66,8 @@ type Note = {
   createdAt: string;
 };
 
+type ClientStatus = "Active" | "Waiting on Records" | "Litigation" | "Settlement" | "Closed";
+
 type Client = {
   id: string;
   firstName: string;
@@ -75,6 +78,7 @@ type Client = {
   dateOfIncident: string;
   ssn: string;
   caseType: string;
+  status: ClientStatus;
   folders: FolderItem[];
   extraFiles: StoredFile[];
   notes: Note[];
@@ -85,6 +89,7 @@ type ClientForm = Omit<Client, "id" | "folders" | "extraFiles" | "notes">;
 type View = "home" | "add-client" | "client-file" | "folder-file";
 
 const STORAGE_KEY = "tj-organization-clients-v5";
+const RECENT_CLIENTS_KEY = "tj-organization-recent-clients-v1";
 const OLD_STORAGE_KEYS = [
   "tj-organization-clients-v4",
   "tj-organization-clients-v3",
@@ -101,6 +106,24 @@ const emptyClientForm: ClientForm = {
   dateOfIncident: "",
   ssn: "",
   caseType: "",
+  status: "Active",
+};
+
+
+const CLIENT_STATUSES: ClientStatus[] = [
+  "Active",
+  "Waiting on Records",
+  "Litigation",
+  "Settlement",
+  "Closed",
+];
+
+const statusClasses: Record<ClientStatus, string> = {
+  Active: "border-emerald-200 bg-emerald-50 text-emerald-700",
+  "Waiting on Records": "border-amber-200 bg-amber-50 text-amber-700",
+  Litigation: "border-blue-200 bg-blue-50 text-blue-700",
+  Settlement: "border-violet-200 bg-violet-50 text-violet-700",
+  Closed: "border-slate-200 bg-slate-100 text-slate-600",
 };
 
 const newId = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -162,6 +185,7 @@ const clientFromRow = (row: ClientRow): Client => ({
   dateOfIncident: row.date_of_incident || "",
   ssn: row.ssn || "",
   caseType: row.case_type || "",
+  status: (row.status as ClientStatus) || "Active",
   folders: [],
   extraFiles: [],
   notes: [],
@@ -241,6 +265,7 @@ const cleanClient = (client: Partial<Client>): Client => ({
   dateOfIncident: client.dateOfIncident || "",
   ssn: client.ssn || "",
   caseType: client.caseType || "",
+  status: client.status || "Active",
   folders: Array.isArray(client.folders) ? client.folders.map(cleanFolder) : [],
   extraFiles: Array.isArray(client.extraFiles) ? client.extraFiles : [],
   notes: Array.isArray(client.notes) ? client.notes : [],
@@ -256,6 +281,15 @@ export default function Home() {
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [view, setView] = useState<View>("home");
   const [search, setSearch] = useState("");
+  const [clientFileSearch, setClientFileSearch] = useState("");
+  const [recentClientIds, setRecentClientIds] = useState<string[]>(() => {
+    try {
+      const saved = window.localStorage.getItem(RECENT_CLIENTS_KEY);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
   const [clientForm, setClientForm] = useState<ClientForm>(emptyClientForm);
   const [folderName, setFolderName] = useState("");
   const [isFolderModalOpen, setIsFolderModalOpen] = useState(false);
@@ -357,17 +391,44 @@ export default function Home() {
     const value = search.trim().toLowerCase();
     if (!value) return sortedClients;
     return sortedClients.filter((client) =>
-      `${client.lastName}, ${client.firstName} ${client.caseType} ${client.phoneNumber} ${client.email}`
+      `${client.lastName}, ${client.firstName} ${client.status} ${client.caseType} ${client.phoneNumber} ${client.email}`
         .toLowerCase()
         .includes(value),
     );
   }, [search, sortedClients]);
+
+  const recentClients = useMemo(
+    () =>
+      recentClientIds
+        .map((id) => clients.find((client) => client.id === id))
+        .filter((client): client is Client => Boolean(client))
+        .slice(0, 6),
+    [clients, recentClientIds],
+  );
 
   const selectedClient =
     clients.find((client) => client.id === selectedClientId) ?? null;
   const selectedFolder =
     selectedClient?.folders.find((folder) => folder.id === selectedFolderId) ??
     null;
+
+  const clientFileSearchResults = useMemo(() => {
+    if (!selectedClient) return [];
+    const query = clientFileSearch.trim().toLowerCase();
+    if (!query) return [];
+
+    const folderFiles = selectedClient.folders.flatMap((folder) =>
+      folder.files
+        .filter((file) => file.name.toLowerCase().includes(query))
+        .map((file) => ({ file, folderId: folder.id, folderName: folder.name })),
+    );
+
+    const extraFiles = selectedClient.extraFiles
+      .filter((file) => file.name.toLowerCase().includes(query))
+      .map((file) => ({ file, folderId: null as string | null, folderName: "Extra Files" }));
+
+    return [...folderFiles, ...extraFiles];
+  }, [clientFileSearch, selectedClient]);
 
   useEffect(() => {
     if (!isLoggedIn || clients.length === 0) return;
@@ -431,6 +492,12 @@ export default function Home() {
   };
 
   const openClient = (clientId: string) => {
+    setRecentClientIds((current) => {
+      const next = [clientId, ...current.filter((id) => id !== clientId)].slice(0, 6);
+      window.localStorage.setItem(RECENT_CLIENTS_KEY, JSON.stringify(next));
+      return next;
+    });
+    setClientFileSearch("");
     setAppView("client-file", clientId, null);
   };
 
@@ -481,6 +548,7 @@ export default function Home() {
       dateOfIncident: clientForm.dateOfIncident.trim(),
       ssn: clientForm.ssn.trim(),
       caseType: clientForm.caseType.trim(),
+      status: clientForm.status,
     };
 
     const dbInput = {
@@ -492,6 +560,7 @@ export default function Home() {
       date_of_incident: cleanedForm.dateOfIncident,
       ssn: cleanedForm.ssn,
       case_type: cleanedForm.caseType,
+      status: cleanedForm.status,
     };
 
     if (editingClientId) {
@@ -543,8 +612,25 @@ export default function Home() {
       dateOfIncident: client.dateOfIncident,
       ssn: client.ssn,
       caseType: client.caseType,
+      status: client.status,
     });
     setAppView("add-client", client.id, null);
+  };
+
+  const changeClientStatus = async (clientId: string, status: ClientStatus) => {
+    setAppError("");
+    const { data, error } = await updateClientInDb(clientId, { status });
+
+    if (error || !data) {
+      setAppError(error?.message || "Could not update client status.");
+      return;
+    }
+
+    setClients((current) =>
+      current.map((client) =>
+        client.id === clientId ? { ...client, status } : client,
+      ),
+    );
   };
 
   const deleteClient = async (clientId: string) => {
@@ -1017,97 +1103,113 @@ const deleteFolderFile = async (fileId: string) => {
             initial={{ opacity: 0, y: 14 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5, ease: "easeOut" }}
-            className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm md:p-8"
+            className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_340px]"
           >
-            <div className="mb-6 flex flex-col justify-between gap-4 border-b border-slate-200 pb-6 md:flex-row md:items-end">
-              <div>
-                <p className="text-sm font-black uppercase tracking-[0.25em] text-blue-600">
-                  Home
-                </p>
-                <h2 className="mt-2 text-4xl font-black tracking-tight md:text-5xl">
-                  Clients A-Z
-                </h2>
-                <p className="mt-2 text-slate-500">
-                  Sorted by last name, then first name.
-                </p>
+            <section className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm md:p-8">
+              <div className="mb-6 flex flex-col justify-between gap-4 border-b border-slate-200 pb-6 md:flex-row md:items-end">
+                <div>
+                  <p className="text-sm font-black uppercase tracking-[0.25em] text-blue-600">Home</p>
+                  <h2 className="mt-2 text-4xl font-black tracking-tight md:text-5xl">All Clients</h2>
+                  <p className="mt-2 text-slate-500">Sorted by last name, then first name.</p>
+                </div>
+                <button
+                  onClick={() => setAppView("add-client", null, null)}
+                  className="flex items-center justify-center gap-2 rounded-2xl bg-blue-600 px-5 py-4 font-black text-white hover:bg-blue-700"
+                >
+                  <UserPlus className="h-5 w-5" /> Add Client
+                </button>
               </div>
-              <button
-                onClick={() => setAppView("add-client", null, null)}
-                className="flex items-center justify-center gap-2 rounded-2xl bg-blue-600 px-5 py-4 font-black text-white hover:bg-blue-700"
-              >
-                <UserPlus className="h-5 w-5" /> Add Client
-              </button>
-            </div>
-            <div className="mb-6 flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
-              <Search className="h-5 w-5 text-slate-400" />
-              <input
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                className="w-full bg-transparent outline-none"
-                placeholder="Search client, case type, phone, email..."
-              />
-            </div>
-            {filteredClients.length === 0 ? (
-              <div className="flex min-h-[420px] items-center justify-center rounded-3xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center">
-                <div className="max-w-lg">
-                  <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-3xl bg-blue-50 text-blue-600">
-                    <UserPlus className="h-9 w-9" />
+
+              <div className="mb-6 flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                <Search className="h-5 w-5 text-slate-400" />
+                <input
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  className="w-full bg-transparent outline-none"
+                  placeholder="Search client, status, case type, phone, email..."
+                />
+              </div>
+
+              {filteredClients.length === 0 ? (
+                <div className="flex min-h-[420px] items-center justify-center rounded-3xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center">
+                  <div className="max-w-lg">
+                    <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-3xl bg-blue-50 text-blue-600">
+                      <UserPlus className="h-9 w-9" />
+                    </div>
+                    <h3 className="text-3xl font-black">No clients found</h3>
+                    <p className="mt-3 text-slate-500">Try another search or add a new client.</p>
                   </div>
-                  <h3 className="text-3xl font-black">No clients yet</h3>
-                  <p className="mt-3 text-slate-500">
-                    Add your first client file when you're ready.
-                  </p>
+                </div>
+              ) : (
+                <div className="overflow-hidden rounded-3xl border border-slate-200">
+                  {filteredClients.map((client) => (
+                    <div
+                      key={client.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => openClient(client.id)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") openClient(client.id);
+                      }}
+                      className="grid cursor-pointer gap-3 border-b border-slate-200 bg-white p-4 text-left last:border-b-0 hover:bg-blue-50/40 md:grid-cols-[1.4fr_1fr_1fr_auto] md:items-center"
+                    >
+                      <div>
+                        <p className="text-lg font-black">{clientName(client)}</p>
+                        <div className="mt-1 flex flex-wrap items-center gap-2">
+                          <p className="text-sm text-slate-500">{displayValue(client.caseType)}</p>
+                          <span className={`rounded-full border px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.12em] ${statusClasses[client.status]}`}>
+                            {client.status}
+                          </span>
+                        </div>
+                      </div>
+                      <p className="text-sm text-slate-500">Incident: <span className="font-bold text-slate-700">{formatDate(client.dateOfIncident)}</span></p>
+                      <p className="text-sm text-slate-500">Folders: <span className="font-bold text-slate-700">{client.folders.length}</span></p>
+                      <div className="flex items-center gap-2 md:justify-end">
+                        <span className="hidden items-center gap-1 text-sm font-black text-blue-700 md:flex">Open <ChevronRight className="h-4 w-4" /></span>
+                        <button
+                          onClick={(event) => { event.stopPropagation(); deleteClient(client.id); }}
+                          className="rounded-2xl border border-slate-200 bg-white p-3 text-slate-400 hover:border-red-200 hover:bg-red-50 hover:text-red-600"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            <aside className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm xl:sticky xl:top-28 xl:self-start">
+              <div className="mb-5 flex items-center gap-3">
+                <div className="rounded-2xl bg-blue-50 p-3 text-blue-700"><Clock3 className="h-5 w-5" /></div>
+                <div>
+                  <h3 className="text-2xl font-black">Recently Viewed</h3>
+                  <p className="text-sm text-slate-500">Your latest client files.</p>
                 </div>
               </div>
-            ) : (
-              <div className="overflow-hidden rounded-3xl border border-slate-200">
-                {filteredClients.map((client) => (
-                  <div
-                    key={client.id}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => openClient(client.id)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") openClient(client.id);
-                    }}
-                    className="grid cursor-pointer gap-3 border-b border-slate-200 bg-white p-4 text-left last:border-b-0 hover:bg-blue-50/40 md:grid-cols-[1.5fr_1fr_1fr_auto] md:items-center"
-                  >
-                    <div>
-                      <p className="text-lg font-black">{clientName(client)}</p>
-                      <p className="text-sm text-slate-500">
-                        {displayValue(client.caseType)}
-                      </p>
-                    </div>
-                    <p className="text-sm text-slate-500">
-                      Incident:{" "}
-                      <span className="font-bold text-slate-700">
-                        {formatDate(client.dateOfIncident)}
-                      </span>
-                    </p>
-                    <p className="text-sm text-slate-500">
-                      Folders:{" "}
-                      <span className="font-bold text-slate-700">
-                        {client.folders.length}
-                      </span>
-                    </p>
-                    <div className="flex items-center gap-2 md:justify-end">
-                      <span className="hidden items-center gap-1 text-sm font-black text-blue-700 md:flex">
-                        Open <ChevronRight className="h-4 w-4" />
-                      </span>
-                      <button
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          deleteClient(client.id);
-                        }}
-                        className="rounded-2xl border border-slate-200 bg-white p-3 text-slate-400 hover:border-red-200 hover:bg-red-50 hover:text-red-600"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+
+              {recentClients.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-center text-sm text-slate-500">
+                  Open a client and it will appear here.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {recentClients.map((client) => (
+                    <button
+                      key={client.id}
+                      onClick={() => openClient(client.id)}
+                      className="flex w-full items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-left transition hover:border-blue-200 hover:bg-blue-50"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate font-black text-slate-900">{clientName(client)}</p>
+                        <p className="truncate text-xs text-slate-500">{displayValue(client.caseType)}</p>
+                      </div>
+                      <ChevronRight className="h-4 w-4 shrink-0 text-blue-600" />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </aside>
           </motion.section>
         )}
 
@@ -1176,6 +1278,18 @@ const deleteFolderFile = async (fileId: string) => {
                 onChange={(value) => updateClientForm("caseType", value)}
                 placeholder="Case Type"
               />
+              <label className="block">
+                <span className="mb-2 block text-sm font-black text-slate-600">Client Status</span>
+                <select
+                  value={clientForm.status}
+                  onChange={(event) => updateClientForm("status", event.target.value as ClientStatus)}
+                  className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-blue-600"
+                >
+                  {CLIENT_STATUSES.map((status) => (
+                    <option key={status} value={status}>{status}</option>
+                  ))}
+                </select>
+              </label>
             </div>
             <div className="mt-8 flex flex-col gap-3 sm:flex-row">
               <button
@@ -1229,9 +1343,50 @@ const deleteFolderFile = async (fileId: string) => {
             selectedFolder={selectedFolder}
             setAppView={setAppView}
             startEditClient={startEditClient}
+            changeClientStatus={changeClientStatus}
             showNotes
           >
             <section className="space-y-6">
+              <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
+                <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                  <Search className="h-5 w-5 text-slate-400" />
+                  <input
+                    value={clientFileSearch}
+                    onChange={(event) => setClientFileSearch(event.target.value)}
+                    className="w-full bg-transparent outline-none"
+                    placeholder="Search every file in this client..."
+                  />
+                </div>
+
+                {clientFileSearch.trim() && (
+                  <div className="mt-4 overflow-hidden rounded-2xl border border-slate-200">
+                    {clientFileSearchResults.length === 0 ? (
+                      <div className="p-5 text-center text-sm text-slate-500">No matching files found.</div>
+                    ) : (
+                      clientFileSearchResults.map(({ file, folderId, folderName }) => (
+                        <button
+                          key={file.id}
+                          onClick={() => {
+                            if (folderId) {
+                              setAppView("folder-file", selectedClient.id, folderId);
+                            } else {
+                              handlePreviewFile(file);
+                            }
+                          }}
+                          className="flex w-full items-center justify-between gap-3 border-b border-slate-200 bg-white p-4 text-left last:border-b-0 hover:bg-blue-50"
+                        >
+                          <div className="min-w-0">
+                            <p className="truncate font-black text-slate-900">{file.name}</p>
+                            <p className="mt-1 text-xs font-bold text-slate-500">Located in: {folderName}</p>
+                          </div>
+                          <ChevronRight className="h-4 w-4 shrink-0 text-blue-600" />
+                        </button>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+
               <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="mb-5 flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
                   <div>
@@ -1321,6 +1476,7 @@ const deleteFolderFile = async (fileId: string) => {
             selectedFolder={selectedFolder}
             setAppView={setAppView}
             startEditClient={startEditClient}
+            changeClientStatus={changeClientStatus}
             showNotes={false}
           >
             <section className="space-y-6">
@@ -1459,6 +1615,7 @@ function ClientShell({
   goHome,
   setAppView,
   startEditClient,
+  changeClientStatus,
   noteText,
   setNoteText,
   addNote,
@@ -1472,6 +1629,7 @@ function ClientShell({
   goHome: () => void;
   setAppView: (view: View, clientId?: string | null, folderId?: string | null) => void;
   startEditClient: (client: Client) => void;
+  changeClientStatus: (clientId: string, status: ClientStatus) => void;
   noteText: string;
   setNoteText: (value: string) => void;
   addNote: () => void;
@@ -1505,12 +1663,24 @@ function ClientShell({
               {displayValue(selectedClient.caseType)}
             </p>
           </div>
-          <button
-            onClick={() => startEditClient(selectedClient)}
-            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-black text-slate-500 hover:border-blue-200 hover:text-blue-700"
-          >
-            Edit Client
-          </button>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <select
+              value={selectedClient.status}
+              onChange={(event) => changeClientStatus(selectedClient.id, event.target.value as ClientStatus)}
+              className={`rounded-xl border px-3 py-2 text-sm font-black outline-none ${statusClasses[selectedClient.status]}`}
+              aria-label="Client status"
+            >
+              {CLIENT_STATUSES.map((status) => (
+                <option key={status} value={status}>{status}</option>
+              ))}
+            </select>
+            <button
+              onClick={() => startEditClient(selectedClient)}
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-black text-slate-500 hover:border-blue-200 hover:text-blue-700"
+            >
+              Edit Client
+            </button>
+          </div>
         </div>
         <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
           <InfoCard
