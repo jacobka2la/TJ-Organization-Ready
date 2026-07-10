@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { getCurrentSession, loginWithEmail, logout } from "@/services/auth";
 import {
@@ -10,7 +10,14 @@ import {
 } from "@/services/clients";
 import { createFolder as createFolderInDb, getFolders, softDeleteFolder, type FolderRow } from "@/services/folders";
 import { createNote as createNoteInDb, getNotes, softDeleteNote, type NoteRow } from "@/services/notes";
-import { getFiles, getSignedFileUrl, softDeleteFile, uploadClientFile, type FileRow } from "@/services/files";
+import {
+  getFiles,
+  getSignedFileUrl,
+  renameFile as renameFileInDb,
+  softDeleteFile,
+  uploadClientFile,
+  type FileRow,
+} from "@/services/files";
 import {
   ArrowLeft,
   BriefcaseBusiness,
@@ -24,6 +31,7 @@ import {
   LockKeyhole,
   LogOut,
   Mail,
+  Pencil,
   Phone,
   Plus,
   Search,
@@ -679,6 +687,44 @@ export default function Home() {
       ),
     );
   };
+
+const renameFile = async (fileId: string, currentName: string) => {
+  const nextName = window.prompt("Enter a new file name:", currentName);
+
+  if (nextName === null) return;
+
+  const trimmedName = nextName.trim();
+
+  if (!trimmedName || trimmedName === currentName) return;
+
+  const { data, error } = await renameFileInDb(fileId, trimmedName);
+
+  if (error || !data) {
+    setAppError(error?.message || "Could not rename file.");
+    return;
+  }
+
+  setClients((current) =>
+    current.map((client) => ({
+      ...client,
+      extraFiles: client.extraFiles.map((file) =>
+        file.id === fileId ? { ...file, name: data.name } : file,
+      ),
+      folders: client.folders.map((folder) => ({
+        ...folder,
+        files: folder.files.map((file) =>
+          file.id === fileId ? { ...file, name: data.name } : file,
+        ),
+      })),
+    })),
+  );
+
+  if (previewFile?.id === fileId) {
+    setPreviewFile((current) =>
+      current ? { ...current, name: data.name } : null,
+    );
+  }
+};
 
   const deleteFolderFile = async (fileId: string) => {
     if (!selectedClient || !selectedFolder) return;
@@ -1570,25 +1616,88 @@ function UploadBox({
   label: string;
   onFiles: (files: FileList | null) => void;
 }) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
+
+  const handleFiles = (files: FileList | null) => {
+    if (!files?.length) return;
+    onFiles(files);
+  };
+
   return (
-    <label className="mb-4 flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50 p-5 text-center transition hover:border-blue-300 hover:bg-blue-50/40">
-      <div className="mb-2 rounded-xl bg-white p-3 text-blue-600 shadow-sm">
-        <Upload className="h-5 w-5" />
+    <div
+      role="button"
+      tabIndex={0}
+      onClick={() => inputRef.current?.click()}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          inputRef.current?.click();
+        }
+      }}
+      onDragEnter={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setIsDragging(true);
+      }}
+      onDragOver={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        event.dataTransfer.dropEffect = "copy";
+        setIsDragging(true);
+      }}
+      onDragLeave={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+
+        if (!event.currentTarget.contains(event.relatedTarget as Node)) {
+          setIsDragging(false);
+        }
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setIsDragging(false);
+        handleFiles(event.dataTransfer.files);
+      }}
+      className={`mb-4 flex cursor-pointer flex-col items-center justify-center rounded-2xl border-2 border-dashed p-6 text-center transition ${
+        isDragging
+          ? "scale-[1.01] border-blue-600 bg-blue-50 shadow-md"
+          : "border-slate-300 bg-slate-50 hover:border-blue-300 hover:bg-blue-50/40"
+      }`}
+    >
+      <div
+        className={`mb-3 rounded-xl p-3 shadow-sm transition ${
+          isDragging
+            ? "bg-blue-600 text-white"
+            : "bg-white text-blue-600"
+        }`}
+      >
+        <Upload className="h-6 w-6" />
       </div>
-      <p className="text-sm font-black">{label}</p>
-      <p className="mt-1 text-sm text-slate-500">
-        Click here and select one or more files.
+
+      <p className="text-base font-black">
+        {isDragging ? "Drop files here" : label}
       </p>
+
+      <p className="mt-1 text-sm text-slate-500">
+        Drag and drop files here, or click to browse.
+      </p>
+
+      <p className="mt-3 rounded-lg bg-white px-3 py-1 text-xs font-bold text-slate-400 shadow-sm">
+        Multiple files supported
+      </p>
+
       <input
+        ref={inputRef}
         type="file"
         multiple
         className="hidden"
         onChange={(event) => {
-          onFiles(event.target.files);
+          handleFiles(event.target.files);
           event.currentTarget.value = "";
         }}
       />
-    </label>
+    </div>
   );
 }
 
@@ -1596,19 +1705,22 @@ function FileList({
   files,
   emptyText,
   onDelete,
+  onRename,
   onPreview,
 }: {
   files: StoredFile[];
   emptyText: string;
   onDelete: (fileId: string) => void;
+  onRename: (fileId: string, currentName: string) => void;
   onPreview: (file: StoredFile) => void;
 }) {
-  if (files.length === 0)
+  if (files.length === 0) {
     return (
       <div className="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-4 text-center text-sm text-slate-500">
         {emptyText}
       </div>
     );
+  }
 
   return (
     <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -1619,38 +1731,64 @@ function FileList({
           tabIndex={0}
           onClick={() => onPreview(file)}
           onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") onPreview(file);
+            if (event.key === "Enter" || event.key === " ") {
+              onPreview(file);
+            }
           }}
           className="group overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-blue-200"
         >
           <FileThumb file={file} />
+
           <div className="p-3">
             <div className="mb-2 flex items-start justify-between gap-2">
               <div className="min-w-0">
-                <p className="truncate text-sm font-black text-slate-950 group-hover:text-blue-700">
+                <p
+                  className="truncate text-sm font-black text-slate-950 group-hover:text-blue-700"
+                  title={file.name}
+                >
                   {file.name}
                 </p>
+
                 <p className="mt-1 text-[10px] font-black uppercase tracking-[0.14em] text-slate-400">
                   {fileTypeLabel(file)} • {fileSizeLabel(file.size)}
                 </p>
               </div>
-              <span className="rounded-lg bg-blue-50 px-2 py-1 text-[10px] font-black text-blue-700">
+
+              <span className="shrink-0 rounded-lg bg-blue-50 px-2 py-1 text-[10px] font-black text-blue-700">
                 {fileTypeLabel(file)}
               </span>
             </div>
+
             <div className="flex items-center justify-between border-t border-slate-100 pt-2">
               <p className="text-xs font-bold text-slate-400">
                 {formatDate(file.uploadedAt)}
               </p>
-              <button
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onDelete(file.id);
-                }}
-                className="rounded-lg px-2 py-1 text-xs font-black text-slate-300 hover:bg-red-50 hover:text-red-600"
-              >
-                Delete
-              </button>
+
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  title="Rename file"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onRename(file.id, file.name);
+                  }}
+                  className="rounded-lg p-2 text-slate-400 transition hover:bg-blue-50 hover:text-blue-600"
+                >
+                  <Pencil className="h-4 w-4" />
+                </button>
+
+                <button
+                  type="button"
+                  title="Delete file"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onDelete(file.id);
+                  }}
+                  className="rounded-lg p-2 text-slate-400 transition hover:bg-red-50 hover:text-red-600"
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              </div>
             </div>
           </div>
         </article>
