@@ -44,3 +44,16 @@ export async function getSignedFileUrl(storagePath: string) {
 export async function softDeleteFile(id: string) {
   return supabase.from("files").update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", id);
 }
+
+export async function renameFile(id: string, name: string) {
+  return supabase
+    .from("files")
+    .update({
+      name,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", id)
+    .select()
+    .single();
+}
+
