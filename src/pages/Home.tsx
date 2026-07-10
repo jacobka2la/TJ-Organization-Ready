@@ -1477,8 +1477,8 @@ function StickyNotes({
               className="rounded-2xl border border-yellow-200 bg-white p-4 shadow-sm"
             >
               <div className="mb-3 flex items-center justify-between gap-3">
-                <p className="text-xs font-black uppercase tracking-[0.16em] text-slate-400">
-                  {formatDate(note.createdAt)}
+                <p className="min-w-0 truncate text-xs font-bold text-slate-400">
+                  {new Date(note.createdAt).toLocaleDateString()}
                 </p>
                 <button
                   onClick={() => deleteNote(note.id)}
