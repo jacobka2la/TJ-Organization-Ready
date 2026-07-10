@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
+import AIClientImport from "@/components/AIClientImport";
 import { getCurrentSession, loginWithEmail, logout } from "@/services/auth";
 import {
   createClient as createClientInDb,
@@ -39,6 +40,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   StickyNote,
+  Sparkles,
   Trash2,
   Upload,
   UserPlus,
@@ -298,6 +300,7 @@ export default function Home() {
   const [editingClientId, setEditingClientId] = useState<string | null>(null);
   const [isDataLoading, setIsDataLoading] = useState(false);
   const [appError, setAppError] = useState("");
+  const [isAiImportOpen, setIsAiImportOpen] = useState(false);
 
   const loadWorkspace = async () => {
     setIsDataLoading(true);
@@ -1112,12 +1115,20 @@ const deleteFolderFile = async (fileId: string) => {
                   <h2 className="mt-2 text-4xl font-black tracking-tight md:text-5xl">All Clients</h2>
                   <p className="mt-2 text-slate-500">Sorted by last name, then first name.</p>
                 </div>
-                <button
-                  onClick={() => setAppView("add-client", null, null)}
-                  className="flex items-center justify-center gap-2 rounded-2xl bg-blue-600 px-5 py-4 font-black text-white hover:bg-blue-700"
-                >
-                  <UserPlus className="h-5 w-5" /> Add Client
-                </button>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <button
+                    onClick={() => setIsAiImportOpen(true)}
+                    className="flex items-center justify-center gap-2 rounded-2xl bg-violet-600 px-5 py-4 font-black text-white hover:bg-violet-700"
+                  >
+                    <Sparkles className="h-5 w-5" /> AI Import
+                  </button>
+                  <button
+                    onClick={() => setAppView("add-client", null, null)}
+                    className="flex items-center justify-center gap-2 rounded-2xl bg-blue-600 px-5 py-4 font-black text-white hover:bg-blue-700"
+                  >
+                    <UserPlus className="h-5 w-5" /> Add Client
+                  </button>
+                </div>
               </div>
 
               <div className="mb-6 flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
@@ -1564,6 +1575,15 @@ const deleteFolderFile = async (fileId: string) => {
           </motion.div>
         </div>
       )}
+      <AIClientImport
+        open={isAiImportOpen}
+        onClose={() => setIsAiImportOpen(false)}
+        onComplete={async (clientId) => {
+          await loadWorkspace();
+          setIsAiImportOpen(false);
+          openClient(clientId);
+        }}
+      />
     </main>
   );
 }

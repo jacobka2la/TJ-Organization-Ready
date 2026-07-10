@@ -10,6 +10,7 @@ export type ClientRow = {
   date_of_incident: string | null;
   ssn: string | null;
   case_type: string | null;
+  status: string | null;
   deleted_at: string | null;
   created_at: string;
   updated_at: string;
@@ -33,6 +34,7 @@ export async function createClient(input: {
   date_of_incident?: string;
   ssn?: string;
   case_type?: string;
+  status?: string;
 }) {
   return supabase.from("clients").insert(input).select().single();
 }
