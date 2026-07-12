@@ -5,16 +5,32 @@ import { getCurrentSession, loginWithEmail, logout } from "@/services/auth";
 import {
   createClient as createClientInDb,
   getClients,
+  restoreClient,
   softDeleteClient,
   updateClient as updateClientInDb,
   type ClientRow,
 } from "@/services/clients";
-import { createFolder as createFolderInDb, getFolders, softDeleteFolder, type FolderRow } from "@/services/folders";
-import { createNote as createNoteInDb, getNotes, softDeleteNote, type NoteRow } from "@/services/notes";
+import {
+  createFolder as createFolderInDb,
+  getFolders,
+  restoreFolder,
+  softDeleteFolder,
+  type FolderRow,
+} from "@/services/folders";
+import {
+  createNote as createNoteInDb,
+  getNotes,
+  restoreNote,
+  softDeleteNote,
+  updateNoteCompletion,
+  type NoteRow,
+} from "@/services/notes";
 import {
   getFiles,
   getSignedFileUrl,
+  moveFiles as moveFilesInDb,
   renameFile as renameFileInDb,
+  restoreFile,
   softDeleteFile,
   uploadClientFile,
   type FileRow,
@@ -24,6 +40,8 @@ import {
   BriefcaseBusiness,
   CalendarDays,
   Check,
+  CheckCircle2,
+  CheckSquare2,
   ChevronRight,
   FileUp,
   Folder,
@@ -32,11 +50,14 @@ import {
   LockKeyhole,
   LogOut,
   Mail,
+  MoveRight,
   Pencil,
   Phone,
   Plus,
   Search,
   Clock3,
+  RotateCcw,
+  Square,
   ShieldAlert,
   ShieldCheck,
   StickyNote,
@@ -66,6 +87,12 @@ type Note = {
   id: string;
   text: string;
   createdAt: string;
+  completed: boolean;
+};
+
+type UndoAction = {
+  message: string;
+  undo: () => Promise<void>;
 };
 
 type ClientStatus = "Active" | "Waiting on Records" | "Litigation" | "Settlement" | "Closed";
@@ -223,7 +250,12 @@ const buildClientsFromRows = (
   noteRows.forEach((row) => {
     const client = clientsById.get(row.client_id);
     if (!client) return;
-    client.notes.push({ id: row.id, text: row.content, createdAt: row.created_at });
+    client.notes.push({
+      id: row.id,
+      text: row.content,
+      createdAt: row.created_at,
+      completed: Boolean(row.completed),
+    });
   });
 
   fileRows.forEach((row) => {
@@ -270,7 +302,9 @@ const cleanClient = (client: Partial<Client>): Client => ({
   status: client.status || "Active",
   folders: Array.isArray(client.folders) ? client.folders.map(cleanFolder) : [],
   extraFiles: Array.isArray(client.extraFiles) ? client.extraFiles : [],
-  notes: Array.isArray(client.notes) ? client.notes : [],
+  notes: Array.isArray(client.notes)
+    ? client.notes.map((note) => ({ ...note, completed: Boolean(note.completed) }))
+    : [],
 });
 
 export default function Home() {
@@ -301,6 +335,25 @@ export default function Home() {
   const [isDataLoading, setIsDataLoading] = useState(false);
   const [appError, setAppError] = useState("");
   const [isAiImportOpen, setIsAiImportOpen] = useState(false);
+  const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
+  const [moveTarget, setMoveTarget] = useState("");
+  const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
+
+  const offerUndo = (message: string, undo: () => Promise<void>) => {
+    setUndoAction({ message, undo });
+  };
+
+  const runUndo = async () => {
+    if (!undoAction) return;
+    const action = undoAction;
+    setUndoAction(null);
+    setAppError("");
+    try {
+      await action.undo();
+    } catch (error) {
+      setAppError(error instanceof Error ? error.message : "Could not undo that action.");
+    }
+  };
 
   const loadWorkspace = async () => {
     setIsDataLoading(true);
@@ -387,6 +440,17 @@ export default function Home() {
     window.addEventListener("popstate", handleBrowserBack);
     return () => window.removeEventListener("popstate", handleBrowserBack);
   }, []);
+
+  useEffect(() => {
+    setSelectedFileIds([]);
+    setMoveTarget("");
+  }, [selectedClientId, selectedFolderId, view]);
+
+  useEffect(() => {
+    if (!undoAction) return;
+    const timeout = window.setTimeout(() => setUndoAction(null), 10000);
+    return () => window.clearTimeout(timeout);
+  }, [undoAction]);
 
 
   const sortedClients = useMemo(() => sortClients(clients), [clients]);
@@ -639,17 +703,26 @@ export default function Home() {
   const deleteClient = async (clientId: string) => {
     const client = clients.find((item) => item.id === clientId);
     if (!client) return;
+
     const confirmed = window.confirm(
       `Delete ${clientName(client)}?\n\nThis client file will be removed.`,
     );
     if (!confirmed) return;
+
     const { error } = await softDeleteClient(clientId);
     if (error) {
       setAppError(error.message || "Could not delete client.");
       return;
     }
+
     setClients((current) => current.filter((item) => item.id !== clientId));
     if (selectedClientId === clientId) goHome();
+
+    offerUndo(`Deleted ${clientName(client)}.`, async () => {
+      const { error: restoreError } = await restoreClient(clientId);
+      if (restoreError) throw restoreError;
+      await loadWorkspace();
+    });
   };
 
   const addFolder = async () => {
@@ -680,7 +753,6 @@ export default function Home() {
     const confirmed = window.confirm(
       `Delete "${folder.name}"?\n\nThe folder and its file list will be removed.`,
     );
-
     if (!confirmed) return;
 
     const { error } = await softDeleteFolder(folderId);
@@ -688,6 +760,7 @@ export default function Home() {
       setAppError(error.message || "Could not delete folder.");
       return;
     }
+
     setClients((current) =>
       current.map((client) =>
         client.id === selectedClient.id
@@ -698,6 +771,12 @@ export default function Home() {
           : client,
       ),
     );
+
+    offerUndo(`Deleted folder “${folder.name}.”`, async () => {
+      const { error: restoreError } = await restoreFolder(folderId);
+      if (restoreError) throw restoreError;
+      await loadWorkspace();
+    });
   };
 
   const readUploadedFiles = async (files: FileList | null): Promise<StoredFile[]> => {
@@ -793,15 +872,12 @@ export default function Home() {
 
 const renameFile = async (fileId: string, currentName: string) => {
   const nextName = window.prompt("Enter a new file name:", currentName);
-
   if (nextName === null) return;
 
   const trimmedName = nextName.trim();
-
   if (!trimmedName || trimmedName === currentName) return;
 
   setAppError("");
-
   const { error } = await renameFileInDb(fileId, trimmedName);
 
   if (error) {
@@ -809,52 +885,47 @@ const renameFile = async (fileId: string, currentName: string) => {
     return;
   }
 
-  setClients((current) =>
-    current.map((client) => ({
-      ...client,
-
-      extraFiles: client.extraFiles.map((file) =>
-        file.id === fileId
-          ? { ...file, name: trimmedName }
-          : file,
-      ),
-
-      folders: client.folders.map((folder) => ({
-        ...folder,
-
-        files: folder.files.map((file) =>
-          file.id === fileId
-            ? { ...file, name: trimmedName }
-            : file,
+  const applyNameLocally = (name: string) => {
+    setClients((current) =>
+      current.map((client) => ({
+        ...client,
+        extraFiles: client.extraFiles.map((file) =>
+          file.id === fileId ? { ...file, name } : file,
         ),
+        folders: client.folders.map((folder) => ({
+          ...folder,
+          files: folder.files.map((file) =>
+            file.id === fileId ? { ...file, name } : file,
+          ),
+        })),
       })),
-    })),
-  );
+    );
+    setPreviewFile((current) =>
+      current?.id === fileId ? { ...current, name } : current,
+    );
+  };
 
-  setPreviewFile((current) =>
-    current?.id === fileId
-      ? { ...current, name: trimmedName }
-      : current,
-  );
+  applyNameLocally(trimmedName);
+
+  offerUndo(`Renamed file to “${trimmedName}.”`, async () => {
+    const { error: undoError } = await renameFileInDb(fileId, currentName);
+    if (undoError) throw undoError;
+    applyNameLocally(currentName);
+  });
 };
 
 const deleteFolderFile = async (fileId: string) => {
   if (!selectedClient || !selectedFolder) return;
 
-  const file = selectedFolder.files.find(
-    (item) => item.id === fileId,
-  );
-
+  const file = selectedFolder.files.find((item) => item.id === fileId);
   if (!file) return;
 
   const confirmed = window.confirm(
     `Are you sure you want to delete "${file.name}"?`,
   );
-
   if (!confirmed) return;
 
   setAppError("");
-
   const { error } = await softDeleteFile(fileId);
 
   if (error) {
@@ -867,16 +938,9 @@ const deleteFolderFile = async (fileId: string) => {
       client.id === selectedClient.id
         ? {
             ...client,
-
             folders: client.folders.map((folder) =>
               folder.id === selectedFolder.id
-                ? {
-                    ...folder,
-
-                    files: folder.files.filter(
-                      (item) => item.id !== fileId,
-                    ),
-                  }
+                ? { ...folder, files: folder.files.filter((item) => item.id !== fileId) }
                 : folder,
             ),
           }
@@ -884,53 +948,52 @@ const deleteFolderFile = async (fileId: string) => {
     ),
   );
 
-  if (previewFile?.id === fileId) {
-    setPreviewFile(null);
-  }
+  setSelectedFileIds((current) => current.filter((id) => id !== fileId));
+  if (previewFile?.id === fileId) setPreviewFile(null);
+
+  offerUndo(`Deleted “${file.name}.”`, async () => {
+    const { error: restoreError } = await restoreFile(fileId);
+    if (restoreError) throw restoreError;
+    await loadWorkspace();
+  });
 };
 
   const deleteExtraFile = async (fileId: string) => {
-  if (!selectedClient) return;
+    if (!selectedClient) return;
 
-  const file = selectedClient.extraFiles.find(
-    (item) => item.id === fileId,
-  );
+    const file = selectedClient.extraFiles.find((item) => item.id === fileId);
+    if (!file) return;
 
-  if (!file) return;
+    const confirmed = window.confirm(
+      `Are you sure you want to delete "${file.name}"?`,
+    );
+    if (!confirmed) return;
 
-  const confirmed = window.confirm(
-    `Are you sure you want to delete "${file.name}"?`,
-  );
+    setAppError("");
+    const { error } = await softDeleteFile(fileId);
 
-  if (!confirmed) return;
+    if (error) {
+      setAppError(error.message || "Could not delete file.");
+      return;
+    }
 
-  setAppError("");
+    setClients((current) =>
+      current.map((client) =>
+        client.id === selectedClient.id
+          ? { ...client, extraFiles: client.extraFiles.filter((item) => item.id !== fileId) }
+          : client,
+      ),
+    );
 
-  const { error } = await softDeleteFile(fileId);
+    setSelectedFileIds((current) => current.filter((id) => id !== fileId));
+    if (previewFile?.id === fileId) setPreviewFile(null);
 
-  if (error) {
-    setAppError(error.message || "Could not delete file.");
-    return;
-  }
-
-  setClients((current) =>
-    current.map((client) =>
-      client.id === selectedClient.id
-        ? {
-            ...client,
-
-            extraFiles: client.extraFiles.filter(
-              (item) => item.id !== fileId,
-            ),
-          }
-        : client,
-    ),
-  );
-
-  if (previewFile?.id === fileId) {
-    setPreviewFile(null);
-  }
-};
+    offerUndo(`Deleted “${file.name}.”`, async () => {
+      const { error: restoreError } = await restoreFile(fileId);
+      if (restoreError) throw restoreError;
+      await loadWorkspace();
+    });
+  };
 
   const addNote = async () => {
     if (!selectedClient || !noteText.trim()) return;
@@ -939,7 +1002,12 @@ const deleteFolderFile = async (fileId: string) => {
       setAppError(error?.message || "Could not add note.");
       return;
     }
-    const note: Note = { id: data.id, text: data.content, createdAt: data.created_at };
+    const note: Note = {
+      id: data.id,
+      text: data.content,
+      createdAt: data.created_at,
+      completed: Boolean(data.completed),
+    };
     setClients((current) =>
       current.map((client) =>
         client.id === selectedClient.id
@@ -950,44 +1018,117 @@ const deleteFolderFile = async (fileId: string) => {
     setNoteText("");
   };
 
+  const toggleNote = async (noteId: string, completed: boolean) => {
+    if (!selectedClient) return;
+
+    const { error } = await updateNoteCompletion(noteId, completed);
+    if (error) {
+      setAppError(error.message || "Could not update task.");
+      return;
+    }
+
+    const applyCompletionLocally = (nextCompleted: boolean) => {
+      setClients((current) =>
+        current.map((client) =>
+          client.id === selectedClient.id
+            ? {
+                ...client,
+                notes: client.notes.map((note) =>
+                  note.id === noteId ? { ...note, completed: nextCompleted } : note,
+                ),
+              }
+            : client,
+        ),
+      );
+    };
+
+    applyCompletionLocally(completed);
+
+    offerUndo(completed ? "Task completed." : "Task marked incomplete.", async () => {
+      const { error: undoError } = await updateNoteCompletion(noteId, !completed);
+      if (undoError) throw undoError;
+      applyCompletionLocally(!completed);
+    });
+  };
+
   const deleteNote = async (noteId: string) => {
-  if (!selectedClient) return;
+    if (!selectedClient) return;
 
-  const note = selectedClient.notes.find(
-    (item) => item.id === noteId,
-  );
+    const note = selectedClient.notes.find((item) => item.id === noteId);
+    if (!note) return;
 
-  if (!note) return;
+    const confirmed = window.confirm("Are you sure you want to delete this task?");
+    if (!confirmed) return;
 
-  const confirmed = window.confirm(
-    "Are you sure you want to delete this sticky note?",
-  );
+    setAppError("");
+    const { error } = await softDeleteNote(noteId);
 
-  if (!confirmed) return;
+    if (error) {
+      setAppError(error.message || "Could not delete task.");
+      return;
+    }
 
-  setAppError("");
+    setClients((current) =>
+      current.map((client) =>
+        client.id === selectedClient.id
+          ? { ...client, notes: client.notes.filter((item) => item.id !== noteId) }
+          : client,
+      ),
+    );
 
-  const { error } = await softDeleteNote(noteId);
+    offerUndo("Deleted task.", async () => {
+      const { error: restoreError } = await restoreNote(noteId);
+      if (restoreError) throw restoreError;
+      await loadWorkspace();
+    });
+  };
 
-  if (error) {
-    setAppError(error.message || "Could not delete note.");
-    return;
-  }
+  const moveSelectedFiles = async () => {
+    if (!selectedClient || selectedFileIds.length === 0 || !moveTarget) return;
 
-  setClients((current) =>
-    current.map((client) =>
-      client.id === selectedClient.id
-        ? {
-            ...client,
+    const destinationFolderId = moveTarget === "extra" ? null : moveTarget;
+    const destinationName = destinationFolderId
+      ? selectedClient.folders.find((folder) => folder.id === destinationFolderId)?.name || "folder"
+      : "Extra Files";
 
-            notes: client.notes.filter(
-              (item) => item.id !== noteId,
-            ),
-          }
-        : client,
-    ),
-  );
-};
+    const origins = selectedFileIds.map((fileId) => {
+      if (selectedClient.extraFiles.some((file) => file.id === fileId)) {
+        return { fileId, folderId: null as string | null };
+      }
+      const folder = selectedClient.folders.find((item) =>
+        item.files.some((file) => file.id === fileId),
+      );
+      return { fileId, folderId: folder?.id || null };
+    });
+
+    const { error } = await moveFilesInDb(selectedFileIds, destinationFolderId);
+    if (error) {
+      setAppError(error.message || "Could not move selected files.");
+      return;
+    }
+
+    const movedCount = selectedFileIds.length;
+    setSelectedFileIds([]);
+    setMoveTarget("");
+    await loadWorkspace();
+
+    offerUndo(
+      `Moved ${movedCount} ${movedCount === 1 ? "file" : "files"} to ${destinationName}.`,
+      async () => {
+        const groups = new Map<string, string[]>();
+        origins.forEach(({ fileId, folderId }) => {
+          const key = folderId || "extra";
+          groups.set(key, [...(groups.get(key) || []), fileId]);
+        });
+
+        for (const [key, ids] of groups) {
+          const { error: undoError } = await moveFilesInDb(ids, key === "extra" ? null : key);
+          if (undoError) throw undoError;
+        }
+        await loadWorkspace();
+      },
+    );
+  };
 
   if (!isLoggedIn) {
     return (
@@ -1350,6 +1491,7 @@ const deleteFolderFile = async (fileId: string) => {
             setNoteText={setNoteText}
             addNote={addNote}
             deleteNote={deleteNote}
+            toggleNote={toggleNote}
             view={view}
             selectedFolder={selectedFolder}
             setAppView={setAppView}
@@ -1463,12 +1605,29 @@ const deleteFolderFile = async (fileId: string) => {
                   </p>
                 </div>
                 <UploadBox label="Upload extra files" onFiles={addExtraFiles} />
+                <FileMoveToolbar
+                  selectedCount={selectedFileIds.length}
+                  folders={selectedClient.folders}
+                  currentFolderId={null}
+                  moveTarget={moveTarget}
+                  setMoveTarget={setMoveTarget}
+                  onMove={moveSelectedFiles}
+                  onClear={() => setSelectedFileIds([])}
+                />
                 <FileList
                   files={selectedClient.extraFiles}
                   emptyText="No extra files yet."
                   onDelete={deleteExtraFile}
                   onRename={renameFile}
                   onPreview={handlePreviewFile}
+                  selectedFileIds={selectedFileIds}
+                  onToggleSelected={(fileId) =>
+                    setSelectedFileIds((current) =>
+                      current.includes(fileId)
+                        ? current.filter((id) => id !== fileId)
+                        : [...current, fileId],
+                    )
+                  }
                 />
               </div>
             </section>
@@ -1483,6 +1642,7 @@ const deleteFolderFile = async (fileId: string) => {
             setNoteText={setNoteText}
             addNote={addNote}
             deleteNote={deleteNote}
+            toggleNote={toggleNote}
             view={view}
             selectedFolder={selectedFolder}
             setAppView={setAppView}
@@ -1516,12 +1676,29 @@ const deleteFolderFile = async (fileId: string) => {
                   label="Upload files to this folder"
                   onFiles={addFilesToFolder}
                 />
+                <FileMoveToolbar
+                  selectedCount={selectedFileIds.length}
+                  folders={selectedClient.folders}
+                  currentFolderId={selectedFolder.id}
+                  moveTarget={moveTarget}
+                  setMoveTarget={setMoveTarget}
+                  onMove={moveSelectedFiles}
+                  onClear={() => setSelectedFileIds([])}
+                />
                 <FileList
                   files={selectedFolder.files}
                   emptyText="No files uploaded in this folder yet."
                   onDelete={deleteFolderFile}
                   onRename={renameFile}
                   onPreview={handlePreviewFile}
+                  selectedFileIds={selectedFileIds}
+                  onToggleSelected={(fileId) =>
+                    setSelectedFileIds((current) =>
+                      current.includes(fileId)
+                        ? current.filter((id) => id !== fileId)
+                        : [...current, fileId],
+                    )
+                  }
                 />
               </div>
             </section>
@@ -1573,6 +1750,17 @@ const deleteFolderFile = async (fileId: string) => {
               </button>
             </div>
           </motion.div>
+        </div>
+      )}
+      {undoAction && (
+        <div className="fixed bottom-5 left-1/2 z-[70] flex w-[calc(100%-2rem)] max-w-xl -translate-x-1/2 items-center justify-between gap-4 rounded-2xl bg-slate-950 px-5 py-4 text-white shadow-2xl">
+          <p className="text-sm font-bold">{undoAction.message}</p>
+          <button
+            onClick={runUndo}
+            className="flex shrink-0 items-center gap-2 rounded-xl bg-white px-4 py-2 text-sm font-black text-slate-950 hover:bg-slate-100"
+          >
+            <RotateCcw className="h-4 w-4" /> Undo
+          </button>
         </div>
       )}
       <AIClientImport
@@ -1640,6 +1828,7 @@ function ClientShell({
   setNoteText,
   addNote,
   deleteNote,
+  toggleNote,
   showNotes = true,
   children,
 }: {
@@ -1654,6 +1843,7 @@ function ClientShell({
   setNoteText: (value: string) => void;
   addNote: () => void;
   deleteNote: (noteId: string) => void;
+  toggleNote: (noteId: string, completed: boolean) => void;
   showNotes?: boolean;
   children: React.ReactNode;
 }) {
@@ -1748,6 +1938,7 @@ function ClientShell({
             setNoteText={setNoteText}
             addNote={addNote}
             deleteNote={deleteNote}
+            toggleNote={toggleNote}
           />
         )}
       </div>
@@ -1761,13 +1952,67 @@ function StickyNotes({
   setNoteText,
   addNote,
   deleteNote,
+  toggleNote,
 }: {
   selectedClient: Client;
   noteText: string;
   setNoteText: (value: string) => void;
   addNote: () => void;
   deleteNote: (noteId: string) => void;
+  toggleNote: (noteId: string, completed: boolean) => void;
 }) {
+  const activeTasks = selectedClient.notes.filter((note) => !note.completed);
+  const completedTasks = selectedClient.notes.filter((note) => note.completed);
+
+  const renderTask = (note: Note) => (
+    <article
+      key={note.id}
+      className={`rounded-2xl border p-4 shadow-sm ${
+        note.completed
+          ? "border-emerald-200 bg-emerald-50/70"
+          : "border-yellow-200 bg-white"
+      }`}
+    >
+      <div className="flex items-start gap-3">
+        <button
+          type="button"
+          onClick={() => toggleNote(note.id, !note.completed)}
+          className={`mt-0.5 shrink-0 rounded-lg transition ${
+            note.completed ? "text-emerald-600" : "text-slate-400 hover:text-blue-600"
+          }`}
+          title={note.completed ? "Mark incomplete" : "Mark complete"}
+        >
+          {note.completed ? (
+            <CheckCircle2 className="h-6 w-6" />
+          ) : (
+            <Square className="h-6 w-6" />
+          )}
+        </button>
+
+        <div className="min-w-0 flex-1">
+          <p
+            className={`whitespace-pre-wrap leading-relaxed ${
+              note.completed ? "text-slate-500 line-through" : "text-slate-700"
+            }`}
+          >
+            {note.text}
+          </p>
+          <p className="mt-2 text-xs font-bold text-slate-400">
+            {new Date(note.createdAt).toLocaleDateString()}
+          </p>
+        </div>
+
+        <button
+          onClick={() => deleteNote(note.id)}
+          className="shrink-0 rounded-xl p-2 text-slate-300 hover:bg-red-50 hover:text-red-600"
+          title="Delete task"
+        >
+          <Trash2 className="h-4 w-4" />
+        </button>
+      </div>
+    </article>
+  );
+
   return (
     <section className="rounded-3xl border border-yellow-200 bg-yellow-50/80 p-5 shadow-sm xl:sticky xl:top-28 xl:self-start">
       <div className="mb-4 flex items-center gap-3">
@@ -1775,53 +2020,45 @@ function StickyNotes({
           <StickyNote className="h-5 w-5" />
         </div>
         <div>
-          <h3 className="text-2xl font-black">Sticky Notes</h3>
+          <h3 className="text-2xl font-black">Tasks</h3>
           <p className="text-sm text-slate-600">
-            Case notes stay on the right.
+            Write what needs to be done, then check it off.
           </p>
         </div>
       </div>
+
       <textarea
         value={noteText}
         onChange={(event) => setNoteText(event.target.value)}
-        className="min-h-32 w-full rounded-2xl border border-yellow-200 bg-white/80 px-4 py-3 outline-none focus:border-yellow-400"
-        placeholder="Type a new note..."
+        className="min-h-28 w-full rounded-2xl border border-yellow-200 bg-white/80 px-4 py-3 outline-none focus:border-yellow-400"
+        placeholder="What needs to be done?"
       />
       <button
         onClick={addNote}
         className="mt-3 flex w-full items-center justify-center gap-2 rounded-2xl bg-slate-950 px-5 py-3 font-black text-white hover:bg-slate-800"
       >
-        <Check className="h-5 w-5" /> Add Note
+        <Check className="h-5 w-5" /> Add Task
       </button>
+
       <div className="mt-5 space-y-3">
-        {selectedClient.notes.length === 0 ? (
+        {activeTasks.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-yellow-300 bg-white/50 p-6 text-center text-slate-500">
-            No notes yet.
+            No unfinished tasks.
           </div>
         ) : (
-          selectedClient.notes.map((note) => (
-            <article
-              key={note.id}
-              className="rounded-2xl border border-yellow-200 bg-white p-4 shadow-sm"
-            >
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <p className="min-w-0 truncate text-xs font-bold text-slate-400">
-                  {new Date(note.createdAt).toLocaleDateString()}
-                </p>
-                <button
-                  onClick={() => deleteNote(note.id)}
-                  className="rounded-xl p-2 text-slate-300 hover:bg-red-50 hover:text-red-600"
-                >
-                  <Trash2 className="h-4 w-4" />
-                </button>
-              </div>
-              <p className="whitespace-pre-wrap leading-relaxed text-slate-700">
-                {note.text}
-              </p>
-            </article>
-          ))
+          activeTasks.map(renderTask)
         )}
       </div>
+
+      {completedTasks.length > 0 && (
+        <div className="mt-6 border-t border-yellow-200 pt-5">
+          <div className="mb-3 flex items-center gap-2">
+            <CheckCircle2 className="h-5 w-5 text-emerald-600" />
+            <h4 className="font-black text-slate-700">Completed ({completedTasks.length})</h4>
+          </div>
+          <div className="space-y-3">{completedTasks.map(renderTask)}</div>
+        </div>
+      )}
     </section>
   );
 }
@@ -1983,18 +2220,83 @@ function UploadBox({
   );
 }
 
+function FileMoveToolbar({
+  selectedCount,
+  folders,
+  currentFolderId,
+  moveTarget,
+  setMoveTarget,
+  onMove,
+  onClear,
+}: {
+  selectedCount: number;
+  folders: FolderItem[];
+  currentFolderId: string | null;
+  moveTarget: string;
+  setMoveTarget: (value: string) => void;
+  onMove: () => void;
+  onClear: () => void;
+}) {
+  if (selectedCount === 0) return null;
+
+  return (
+    <div className="mb-4 flex flex-col gap-3 rounded-2xl border border-blue-200 bg-blue-50 p-4 md:flex-row md:items-center">
+      <div className="flex items-center gap-2 font-black text-blue-900">
+        <CheckSquare2 className="h-5 w-5" />
+        {selectedCount} {selectedCount === 1 ? "file" : "files"} selected
+      </div>
+      <div className="flex flex-1 flex-col gap-2 sm:flex-row md:justify-end">
+        <select
+          value={moveTarget}
+          onChange={(event) => setMoveTarget(event.target.value)}
+          className="min-w-52 rounded-xl border border-blue-200 bg-white px-3 py-2 text-sm font-bold outline-none focus:border-blue-600"
+        >
+          <option value="">Move to...</option>
+          {currentFolderId !== null && <option value="extra">Extra Files</option>}
+          {folders
+            .filter((folder) => folder.id !== currentFolderId)
+            .map((folder) => (
+              <option key={folder.id} value={folder.id}>
+                {folder.name}
+              </option>
+            ))}
+        </select>
+        <button
+          type="button"
+          onClick={onMove}
+          disabled={!moveTarget}
+          className="flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-sm font-black text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <MoveRight className="h-4 w-4" /> Move
+        </button>
+        <button
+          type="button"
+          onClick={onClear}
+          className="rounded-xl border border-blue-200 bg-white px-4 py-2 text-sm font-black text-blue-700 hover:bg-blue-100"
+        >
+          Clear
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function FileList({
   files,
   emptyText,
   onDelete,
   onRename,
   onPreview,
+  selectedFileIds,
+  onToggleSelected,
 }: {
   files: StoredFile[];
   emptyText: string;
   onDelete: (fileId: string) => void;
   onRename: (fileId: string, currentName: string) => void;
   onPreview: (file: StoredFile) => void;
+  selectedFileIds: string[];
+  onToggleSelected: (fileId: string) => void;
 }) {
   if (files.length === 0) {
     return (
@@ -2017,8 +2319,27 @@ function FileList({
               onPreview(file);
             }
           }}
-          className="group overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-blue-200"
+          className={`group relative overflow-hidden rounded-2xl border bg-white shadow-sm transition hover:-translate-y-0.5 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-blue-200 ${
+            selectedFileIds.includes(file.id)
+              ? "border-blue-500 ring-2 ring-blue-100"
+              : "border-slate-200 hover:border-blue-200"
+          }`}
         >
+          <button
+            type="button"
+            title={selectedFileIds.includes(file.id) ? "Deselect file" : "Select file"}
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleSelected(file.id);
+            }}
+            className="absolute left-3 top-3 z-10 rounded-lg bg-white/95 p-1.5 text-blue-600 shadow-md backdrop-blur"
+          >
+            {selectedFileIds.includes(file.id) ? (
+              <CheckSquare2 className="h-5 w-5" />
+            ) : (
+              <Square className="h-5 w-5 text-slate-400" />
+            )}
+          </button>
           <FileThumb file={file} />
 
           <div className="p-3">

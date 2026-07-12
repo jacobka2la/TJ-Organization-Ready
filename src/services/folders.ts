@@ -10,7 +10,11 @@ export type FolderRow = {
 };
 
 export async function getFolders() {
-  return supabase.from("folders").select("*").is("deleted_at", null).order("created_at", { ascending: true });
+  return supabase
+    .from("folders")
+    .select("*")
+    .is("deleted_at", null)
+    .order("created_at", { ascending: true });
 }
 
 export async function createFolder(input: { client_id: string; name: string }) {
@@ -18,5 +22,21 @@ export async function createFolder(input: { client_id: string; name: string }) {
 }
 
 export async function softDeleteFolder(id: string) {
-  return supabase.from("folders").update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", id);
+  return supabase
+    .from("folders")
+    .update({
+      deleted_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", id);
+}
+
+export async function restoreFolder(id: string) {
+  return supabase
+    .from("folders")
+    .update({
+      deleted_at: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", id);
 }

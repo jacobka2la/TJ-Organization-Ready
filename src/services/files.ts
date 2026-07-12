@@ -17,24 +17,46 @@ export type FileRow = {
 };
 
 export async function getFiles() {
-  return supabase.from("files").select("*").is("deleted_at", null).order("created_at", { ascending: false });
+  return supabase
+    .from("files")
+    .select("*")
+    .is("deleted_at", null)
+    .order("created_at", { ascending: false });
 }
 
-export async function uploadClientFile(input: { clientId: string; folderId?: string | null; file: File; isExtraFile?: boolean }) {
+export async function uploadClientFile(input: {
+  clientId: string;
+  folderId?: string | null;
+  file: File;
+  isExtraFile?: boolean;
+}) {
   const safeName = input.file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
-  const folderPart = input.isExtraFile ? "extra-files" : input.folderId || "folder-files";
+  const folderPart = input.isExtraFile
+    ? "extra-files"
+    : input.folderId || "folder-files";
   const path = `${input.clientId}/${folderPart}/${crypto.randomUUID()}-${safeName}`;
-  const uploadResult = await supabase.storage.from(BUCKET).upload(path, input.file, { upsert: false });
-  if (uploadResult.error) return { data: null, error: uploadResult.error };
-  return supabase.from("files").insert({
-    client_id: input.clientId,
-    folder_id: input.isExtraFile ? null : input.folderId || null,
-    name: input.file.name,
-    storage_path: path,
-    file_type: input.file.type || null,
-    file_size: input.file.size,
-    is_extra_file: Boolean(input.isExtraFile),
-  }).select().single();
+
+  const uploadResult = await supabase.storage
+    .from(BUCKET)
+    .upload(path, input.file, { upsert: false });
+
+  if (uploadResult.error) {
+    return { data: null, error: uploadResult.error };
+  }
+
+  return supabase
+    .from("files")
+    .insert({
+      client_id: input.clientId,
+      folder_id: input.isExtraFile ? null : input.folderId || null,
+      name: input.file.name,
+      storage_path: path,
+      file_type: input.file.type || null,
+      file_size: input.file.size,
+      is_extra_file: Boolean(input.isExtraFile),
+    })
+    .select()
+    .single();
 }
 
 export async function getSignedFileUrl(storagePath: string) {
@@ -42,18 +64,51 @@ export async function getSignedFileUrl(storagePath: string) {
 }
 
 export async function softDeleteFile(id: string) {
-  return supabase.from("files").update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq("id", id);
+  return supabase
+    .from("files")
+    .update({
+      deleted_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", id);
+}
+
+export async function restoreFile(id: string) {
+  return supabase
+    .from("files")
+    .update({
+      deleted_at: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", id);
 }
 
 export async function renameFile(id: string, name: string) {
-  return supabase
+  const { error } = await supabase
     .from("files")
     .update({
       name,
       updated_at: new Date().toISOString(),
     })
-    .eq("id", id)
-    .select()
-    .single();
+    .eq("id", id);
+
+  return { error };
 }
 
+export async function moveFiles(
+  ids: string[],
+  destinationFolderId: string | null,
+) {
+  if (ids.length === 0) return { error: null };
+
+  const { error } = await supabase
+    .from("files")
+    .update({
+      folder_id: destinationFolderId,
+      is_extra_file: destinationFolderId === null,
+      updated_at: new Date().toISOString(),
+    })
+    .in("id", ids);
+
+  return { error };
+}
