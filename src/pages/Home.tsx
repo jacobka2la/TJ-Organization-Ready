@@ -3,6 +3,14 @@ import { motion } from "framer-motion";
 import AIClientImport from "@/components/AIClientImport";
 import { getCurrentSession, loginWithEmail, logout } from "@/services/auth";
 import {
+  createEvent as createEventInDb,
+  getEvents,
+  restoreEvent,
+  softDeleteEvent,
+  updateEvent as updateEventInDb,
+  type EventRow,
+} from "@/services/events";
+import {
   createClient as createClientInDb,
   getClients,
   restoreClient,
@@ -39,6 +47,7 @@ import {
   ArrowLeft,
   BriefcaseBusiness,
   CalendarDays,
+  ChevronLeft,
   Check,
   CheckCircle2,
   CheckSquare2,
@@ -65,6 +74,7 @@ import {
   Trash2,
   Upload,
   UserPlus,
+  X,
 } from "lucide-react";
 
 type StoredFile = {
@@ -89,6 +99,19 @@ type Note = {
   createdAt: string;
   completed: boolean;
 };
+
+type CalendarEvent = {
+  id: string;
+  clientId: string | null;
+  title: string;
+  eventType: string;
+  startAt: string;
+  endAt: string;
+  location: string;
+  notes: string;
+};
+
+type EventForm = Omit<CalendarEvent, "id">;
 
 type UndoAction = {
   message: string;
@@ -115,7 +138,7 @@ type Client = {
 
 type ClientForm = Omit<Client, "id" | "folders" | "extraFiles" | "notes">;
 
-type View = "home" | "add-client" | "client-file" | "folder-file";
+type View = "home" | "calendar" | "add-client" | "client-file" | "folder-file";
 
 const STORAGE_KEY = "tj-organization-clients-v5";
 const RECENT_CLIENTS_KEY = "tj-organization-recent-clients-v1";
@@ -138,6 +161,36 @@ const emptyClientForm: ClientForm = {
   status: "Active",
 };
 
+
+const emptyEventForm: EventForm = {
+  clientId: null,
+  title: "",
+  eventType: "Phone Call",
+  startAt: "",
+  endAt: "",
+  location: "",
+  notes: "",
+};
+
+const EVENT_TYPES = [
+  "Court",
+  "Deposition",
+  "Phone Call",
+  "Client Meeting",
+  "Mediation",
+  "Deadline",
+  "Other",
+];
+
+const eventTypeClasses: Record<string, string> = {
+  Court: "border-blue-200 bg-blue-50 text-blue-700",
+  Deposition: "border-emerald-200 bg-emerald-50 text-emerald-700",
+  "Phone Call": "border-orange-200 bg-orange-50 text-orange-700",
+  "Client Meeting": "border-amber-200 bg-amber-50 text-amber-700",
+  Mediation: "border-violet-200 bg-violet-50 text-violet-700",
+  Deadline: "border-red-200 bg-red-50 text-red-700",
+  Other: "border-slate-200 bg-slate-100 text-slate-700",
+};
 
 const CLIENT_STATUSES: ClientStatus[] = [
   "Active",
@@ -219,6 +272,28 @@ const clientFromRow = (row: ClientRow): Client => ({
   extraFiles: [],
   notes: [],
 });
+
+const calendarEventFromRow = (row: EventRow): CalendarEvent => ({
+  id: row.id,
+  clientId: row.client_id,
+  title: row.title,
+  eventType: row.event_type || "Other",
+  startAt: row.start_at,
+  endAt: row.end_at || "",
+  location: row.location || "",
+  notes: row.notes || "",
+});
+
+const toDateTimeLocal = (value: string) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const offset = date.getTimezoneOffset();
+  return new Date(date.getTime() - offset * 60000).toISOString().slice(0, 16);
+};
+
+const formatEventTime = (value: string) =>
+  new Date(value).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
 
 const storedFileFromRow = (row: FileRow): StoredFile => ({
   id: row.id,
@@ -313,6 +388,7 @@ export default function Home() {
   const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState("");
   const [clients, setClients] = useState<Client[]>([]);
+  const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null);
   const [view, setView] = useState<View>("home");
@@ -338,6 +414,10 @@ export default function Home() {
   const [selectedFileIds, setSelectedFileIds] = useState<string[]>([]);
   const [moveTarget, setMoveTarget] = useState("");
   const [undoAction, setUndoAction] = useState<UndoAction | null>(null);
+  const [calendarMonth, setCalendarMonth] = useState(() => new Date());
+  const [eventForm, setEventForm] = useState<EventForm>(emptyEventForm);
+  const [editingEventId, setEditingEventId] = useState<string | null>(null);
+  const [isEventModalOpen, setIsEventModalOpen] = useState(false);
 
   const offerUndo = (message: string, undo: () => Promise<void>) => {
     setUndoAction({ message, undo });
@@ -358,14 +438,15 @@ export default function Home() {
   const loadWorkspace = async () => {
     setIsDataLoading(true);
     setAppError("");
-    const [clientResult, folderResult, noteResult, fileResult] = await Promise.all([
+    const [clientResult, folderResult, noteResult, fileResult, eventResult] = await Promise.all([
       getClients(),
       getFolders(),
       getNotes(),
       getFiles(),
+      getEvents(),
     ]);
 
-    const firstError = clientResult.error || folderResult.error || noteResult.error || fileResult.error;
+    const firstError = clientResult.error || folderResult.error || noteResult.error || fileResult.error || eventResult.error;
     if (firstError) {
       setAppError(firstError.message || "Could not load workspace data.");
       setIsDataLoading(false);
@@ -378,6 +459,7 @@ export default function Home() {
       noteResult.data || [],
       fileResult.data || [],
     ));
+    setEvents((eventResult.data || []).map((row) => calendarEventFromRow(row as EventRow)));
     setIsDataLoading(false);
   };
 
@@ -395,6 +477,18 @@ export default function Home() {
   useEffect(() => {
     const path = window.location.pathname;
     const match = path.match(/^\/client\/([^/]+)(?:\/folder\/([^/]+))?\/?$/);
+
+    if (path === "/calendar") {
+      window.history.replaceState(
+        { view: "calendar", selectedClientId: null, selectedFolderId: null },
+        "",
+        path,
+      );
+      setView("calendar");
+      setSelectedClientId(null);
+      setSelectedFolderId(null);
+      return;
+    }
 
     if (path === "/add-client") {
       window.history.replaceState(
@@ -534,8 +628,10 @@ export default function Home() {
     const url =
       nextView === "home"
         ? "/"
-        : nextView === "add-client"
-          ? "/add-client"
+        : nextView === "calendar"
+          ? "/calendar"
+          : nextView === "add-client"
+            ? "/add-client"
           : nextView === "folder-file"
             ? `/client/${nextClientId}/folder/${nextFolderId}`
             : `/client/${nextClientId}`;
@@ -570,6 +666,84 @@ export default function Home() {
 
   const openFolder = (folderId: string) => {
     setAppView("folder-file", selectedClientId, folderId);
+  };
+
+  const openCalendar = () => setAppView("calendar", null, null);
+
+  const openNewEvent = (clientId: string | null = null, date?: Date) => {
+    const start = date || new Date();
+    start.setMinutes(Math.ceil(start.getMinutes() / 15) * 15, 0, 0);
+    setEditingEventId(null);
+    setEventForm({
+      ...emptyEventForm,
+      clientId,
+      startAt: toDateTimeLocal(start.toISOString()),
+    });
+    setIsEventModalOpen(true);
+  };
+
+  const openEditEvent = (event: CalendarEvent) => {
+    setEditingEventId(event.id);
+    setEventForm({
+      clientId: event.clientId,
+      title: event.title,
+      eventType: event.eventType,
+      startAt: toDateTimeLocal(event.startAt),
+      endAt: toDateTimeLocal(event.endAt),
+      location: event.location,
+      notes: event.notes,
+    });
+    setIsEventModalOpen(true);
+  };
+
+  const saveEvent = async () => {
+    if (!eventForm.title.trim() || !eventForm.startAt) return;
+    setAppError("");
+    const input = {
+      client_id: eventForm.clientId || null,
+      title: eventForm.title.trim(),
+      event_type: eventForm.eventType,
+      start_at: new Date(eventForm.startAt).toISOString(),
+      end_at: eventForm.endAt ? new Date(eventForm.endAt).toISOString() : null,
+      location: eventForm.location.trim() || null,
+      notes: eventForm.notes.trim() || null,
+    };
+
+    const result = editingEventId
+      ? await updateEventInDb(editingEventId, input)
+      : await createEventInDb(input);
+
+    if (result.error || !result.data) {
+      setAppError(result.error?.message || "Could not save calendar event.");
+      return;
+    }
+
+    const saved = calendarEventFromRow(result.data as EventRow);
+    setEvents((current) =>
+      [...current.filter((event) => event.id !== saved.id), saved].sort(
+        (a, b) => new Date(a.startAt).getTime() - new Date(b.startAt).getTime(),
+      ),
+    );
+    setIsEventModalOpen(false);
+    setEditingEventId(null);
+    setEventForm(emptyEventForm);
+  };
+
+  const deleteCalendarEvent = async (event: CalendarEvent) => {
+    const confirmed = window.confirm(`Delete “${event.title}”?`);
+    if (!confirmed) return;
+    const { error } = await softDeleteEvent(event.id);
+    if (error) {
+      setAppError(error.message || "Could not delete calendar event.");
+      return;
+    }
+    setEvents((current) => current.filter((item) => item.id !== event.id));
+    setIsEventModalOpen(false);
+    offerUndo(`Deleted calendar event “${event.title}.”`, async () => {
+      const { error: restoreError } = await restoreEvent(event.id);
+      if (restoreError) throw restoreError;
+      await loadWorkspace();
+    });
   };
 
   const handleLogin = async () => {
@@ -1217,6 +1391,12 @@ const deleteFolderFile = async (fileId: string) => {
               Home
             </button>
             <button
+              onClick={openCalendar}
+              className="flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-2 font-black text-slate-700 hover:border-blue-200 hover:text-blue-700"
+            >
+              <CalendarDays className="h-4 w-4" /> Calendar
+            </button>
+            <button
               onClick={async () => {
   await logout();
   setIsLoggedIn(false);
@@ -1331,7 +1511,19 @@ const deleteFolderFile = async (fileId: string) => {
               )}
             </section>
 
-            <aside className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm xl:sticky xl:top-28 xl:self-start">
+            <aside className="space-y-4 xl:sticky xl:top-28 xl:self-start">
+              <button
+                onClick={openCalendar}
+                className="flex w-full items-center justify-between rounded-3xl border border-blue-200 bg-blue-600 p-5 text-left text-white shadow-sm transition hover:bg-blue-700"
+              >
+                <div>
+                  <p className="text-xs font-black uppercase tracking-[0.22em] text-blue-100">Office Schedule</p>
+                  <h3 className="mt-1 text-2xl font-black">Calendar</h3>
+                  <p className="mt-1 text-sm text-blue-100">Calls, court, depositions, deadlines, and meetings.</p>
+                </div>
+                <CalendarDays className="h-8 w-8 shrink-0" />
+              </button>
+              <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
               <div className="mb-5 flex items-center gap-3">
                 <div className="rounded-2xl bg-blue-50 p-3 text-blue-700"><Clock3 className="h-5 w-5" /></div>
                 <div>
@@ -1361,8 +1553,21 @@ const deleteFolderFile = async (fileId: string) => {
                   ))}
                 </div>
               )}
+              </div>
             </aside>
           </motion.section>
+        )}
+
+        {view === "calendar" && (
+          <CalendarPage
+            events={events}
+            clients={clients}
+            month={calendarMonth}
+            setMonth={setCalendarMonth}
+            openNewEvent={openNewEvent}
+            openEditEvent={openEditEvent}
+            openClient={openClient}
+          />
         )}
 
         {view === "add-client" && (
@@ -1497,6 +1702,10 @@ const deleteFolderFile = async (fileId: string) => {
             setAppView={setAppView}
             startEditClient={startEditClient}
             changeClientStatus={changeClientStatus}
+            clientEvents={events.filter((event) => event.clientId === selectedClient.id)}
+            openCalendar={openCalendar}
+            openNewEvent={openNewEvent}
+            openEditEvent={openEditEvent}
             showNotes
           >
             <section className="space-y-6">
@@ -1648,6 +1857,10 @@ const deleteFolderFile = async (fileId: string) => {
             setAppView={setAppView}
             startEditClient={startEditClient}
             changeClientStatus={changeClientStatus}
+            clientEvents={events.filter((event) => event.clientId === selectedClient.id)}
+            openCalendar={openCalendar}
+            openNewEvent={openNewEvent}
+            openEditEvent={openEditEvent}
             showNotes={false}
           >
             <section className="space-y-6">
@@ -1763,6 +1976,21 @@ const deleteFolderFile = async (fileId: string) => {
           </button>
         </div>
       )}
+      {isEventModalOpen && (
+        <EventModal
+          form={eventForm}
+          setForm={setEventForm}
+          clients={clients}
+          editingEvent={editingEventId ? events.find((event) => event.id === editingEventId) || null : null}
+          onSave={saveEvent}
+          onDelete={deleteCalendarEvent}
+          onClose={() => {
+            setIsEventModalOpen(false);
+            setEditingEventId(null);
+            setEventForm(emptyEventForm);
+          }}
+        />
+      )}
       <AIClientImport
         open={isAiImportOpen}
         onClose={() => setIsAiImportOpen(false)}
@@ -1829,6 +2057,10 @@ function ClientShell({
   addNote,
   deleteNote,
   toggleNote,
+  clientEvents,
+  openCalendar,
+  openNewEvent,
+  openEditEvent,
   showNotes = true,
   children,
 }: {
@@ -1844,6 +2076,10 @@ function ClientShell({
   addNote: () => void;
   deleteNote: (noteId: string) => void;
   toggleNote: (noteId: string, completed: boolean) => void;
+  clientEvents: CalendarEvent[];
+  openCalendar: () => void;
+  openNewEvent: (clientId?: string | null, date?: Date) => void;
+  openEditEvent: (event: CalendarEvent) => void;
   showNotes?: boolean;
   children: React.ReactNode;
 }) {
@@ -1928,6 +2164,12 @@ function ClientShell({
             value={`${selectedClient.extraFiles.length}`}
           />
         </div>
+        <ClientUpcomingEvents
+          events={clientEvents}
+          onOpenCalendar={openCalendar}
+          onAdd={() => openNewEvent(selectedClient.id)}
+          onOpenEvent={openEditEvent}
+        />
       </div>
       <div className={showNotes ? "grid gap-6 xl:grid-cols-[1fr_390px]" : "grid gap-6"}>
         {children}
@@ -2060,6 +2302,193 @@ function StickyNotes({
         </div>
       )}
     </section>
+  );
+}
+
+function ClientUpcomingEvents({
+  events,
+  onOpenCalendar,
+  onAdd,
+  onOpenEvent,
+}: {
+  events: CalendarEvent[];
+  onOpenCalendar: () => void;
+  onAdd: () => void;
+  onOpenEvent: (event: CalendarEvent) => void;
+}) {
+  const upcoming = events
+    .filter((event) => new Date(event.startAt).getTime() >= Date.now() - 60 * 60 * 1000)
+    .sort((a, b) => new Date(a.startAt).getTime() - new Date(b.startAt).getTime())
+    .slice(0, 3);
+
+  return (
+    <div className="mt-4 rounded-xl border border-slate-200 bg-slate-50 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <CalendarDays className="h-4 w-4 text-blue-600" />
+          <p className="text-xs font-black uppercase tracking-[0.14em] text-slate-500">Upcoming for this client</p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={onAdd} className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-black text-white hover:bg-blue-700">Add Event</button>
+          <button onClick={onOpenCalendar} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-black text-slate-600 hover:text-blue-700">Full Calendar</button>
+        </div>
+      </div>
+      {upcoming.length === 0 ? (
+        <p className="mt-3 text-sm text-slate-500">No upcoming calendar events linked to this client.</p>
+      ) : (
+        <div className="mt-3 grid gap-2 md:grid-cols-3">
+          {upcoming.map((event) => (
+            <button key={event.id} onClick={() => onOpenEvent(event)} className="rounded-xl border border-slate-200 bg-white p-3 text-left hover:border-blue-200 hover:bg-blue-50/40">
+              <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-black uppercase ${eventTypeClasses[event.eventType] || eventTypeClasses.Other}`}>{event.eventType}</span>
+              <p className="mt-2 truncate text-sm font-black text-slate-900">{event.title}</p>
+              <p className="mt-1 text-xs text-slate-500">{new Date(event.startAt).toLocaleDateString()} · {formatEventTime(event.startAt)}</p>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CalendarPage({
+  events,
+  clients,
+  month,
+  setMonth,
+  openNewEvent,
+  openEditEvent,
+  openClient,
+}: {
+  events: CalendarEvent[];
+  clients: Client[];
+  month: Date;
+  setMonth: (date: Date) => void;
+  openNewEvent: (clientId?: string | null, date?: Date) => void;
+  openEditEvent: (event: CalendarEvent) => void;
+  openClient: (clientId: string) => void;
+}) {
+  const year = month.getFullYear();
+  const monthIndex = month.getMonth();
+  const firstDay = new Date(year, monthIndex, 1);
+  const gridStart = new Date(year, monthIndex, 1 - firstDay.getDay());
+  const days = Array.from({ length: 42 }, (_, index) => {
+    const date = new Date(gridStart);
+    date.setDate(gridStart.getDate() + index);
+    return date;
+  });
+  const todayKey = new Date().toDateString();
+  const upcoming = events
+    .filter((event) => new Date(event.startAt).getTime() >= Date.now() - 60 * 60 * 1000)
+    .slice(0, 8);
+
+  return (
+    <motion.section initial={{ opacity: 0, y: 14 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.5 }} className="space-y-6">
+      <div className="flex flex-col justify-between gap-4 rounded-3xl border border-slate-200 bg-white p-5 shadow-sm md:flex-row md:items-center md:p-8">
+        <div>
+          <p className="text-sm font-black uppercase tracking-[0.25em] text-blue-600">Office Calendar</p>
+          <h2 className="mt-2 text-4xl font-black tracking-tight md:text-5xl">Schedule</h2>
+          <p className="mt-2 text-slate-500">Court, depositions, calls, meetings, mediations, and deadlines.</p>
+        </div>
+        <button onClick={() => openNewEvent()} className="flex items-center justify-center gap-2 rounded-2xl bg-blue-600 px-5 py-4 font-black text-white hover:bg-blue-700">
+          <Plus className="h-5 w-5" /> Add Event
+        </button>
+      </div>
+
+      <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
+        <section className="rounded-3xl border border-slate-200 bg-white p-4 shadow-sm md:p-6">
+          <div className="mb-5 flex items-center justify-between gap-3">
+            <button onClick={() => setMonth(new Date(year, monthIndex - 1, 1))} className="rounded-xl border border-slate-200 p-2 text-slate-600 hover:text-blue-700"><ChevronLeft className="h-5 w-5" /></button>
+            <h3 className="text-2xl font-black">{month.toLocaleDateString("en-US", { month: "long", year: "numeric" })}</h3>
+            <button onClick={() => setMonth(new Date(year, monthIndex + 1, 1))} className="rounded-xl border border-slate-200 p-2 text-slate-600 hover:text-blue-700"><ChevronRight className="h-5 w-5" /></button>
+          </div>
+          <div className="grid grid-cols-7 border-l border-t border-slate-200 text-center text-xs font-black uppercase tracking-wider text-slate-400">
+            {['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map((day) => <div key={day} className="border-b border-r border-slate-200 bg-slate-50 py-2">{day}</div>)}
+          </div>
+          <div className="grid grid-cols-7 border-l border-slate-200">
+            {days.map((date) => {
+              const dayEvents = events.filter((event) => new Date(event.startAt).toDateString() === date.toDateString());
+              const inMonth = date.getMonth() === monthIndex;
+              const isToday = date.toDateString() === todayKey;
+              return (
+                <div key={date.toISOString()} onDoubleClick={() => openNewEvent(null, date)} className={`min-h-28 border-b border-r border-slate-200 p-2 ${inMonth ? 'bg-white' : 'bg-slate-50/70'}`}>
+                  <button onClick={() => openNewEvent(null, date)} className={`mb-1 flex h-7 w-7 items-center justify-center rounded-full text-xs font-black ${isToday ? 'bg-blue-600 text-white' : inMonth ? 'text-slate-700 hover:bg-blue-50' : 'text-slate-300'}`}>{date.getDate()}</button>
+                  <div className="space-y-1">
+                    {dayEvents.slice(0, 3).map((event) => (
+                      <button key={event.id} onClick={() => openEditEvent(event)} className={`block w-full truncate rounded-lg border px-2 py-1 text-left text-[10px] font-black ${eventTypeClasses[event.eventType] || eventTypeClasses.Other}`}>
+                        {formatEventTime(event.startAt)} {event.title}
+                      </button>
+                    ))}
+                    {dayEvents.length > 3 && <p className="text-[10px] font-bold text-slate-400">+{dayEvents.length - 3} more</p>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <aside className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm xl:sticky xl:top-28 xl:self-start">
+          <h3 className="text-2xl font-black">Upcoming</h3>
+          <p className="mt-1 text-sm text-slate-500">Next office events.</p>
+          <div className="mt-4 space-y-3">
+            {upcoming.length === 0 ? <p className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-5 text-center text-sm text-slate-500">Nothing scheduled.</p> : upcoming.map((event) => {
+              const client = clients.find((item) => item.id === event.clientId);
+              return (
+                <article key={event.id} className="rounded-2xl border border-slate-200 bg-slate-50 p-3">
+                  <button onClick={() => openEditEvent(event)} className="w-full text-left">
+                    <span className={`inline-flex rounded-full border px-2 py-0.5 text-[10px] font-black uppercase ${eventTypeClasses[event.eventType] || eventTypeClasses.Other}`}>{event.eventType}</span>
+                    <p className="mt-2 font-black text-slate-900">{event.title}</p>
+                    <p className="mt-1 text-xs text-slate-500">{new Date(event.startAt).toLocaleDateString()} · {formatEventTime(event.startAt)}</p>
+                  </button>
+                  {client && <button onClick={() => openClient(client.id)} className="mt-2 text-xs font-black text-blue-700 hover:underline">{clientName(client)}</button>}
+                </article>
+              );
+            })}
+          </div>
+        </aside>
+      </div>
+    </motion.section>
+  );
+}
+
+function EventModal({
+  form,
+  setForm,
+  clients,
+  editingEvent,
+  onSave,
+  onDelete,
+  onClose,
+}: {
+  form: EventForm;
+  setForm: React.Dispatch<React.SetStateAction<EventForm>>;
+  clients: Client[];
+  editingEvent: CalendarEvent | null;
+  onSave: () => void;
+  onDelete: (event: CalendarEvent) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-5 backdrop-blur-sm">
+      <motion.div initial={{ opacity: 0, scale: 0.96, y: 10 }} animate={{ opacity: 1, scale: 1, y: 0 }} className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-3xl border border-slate-200 bg-white p-6 shadow-2xl">
+        <div className="mb-5 flex items-start justify-between gap-3">
+          <div><p className="text-xs font-black uppercase tracking-[0.22em] text-blue-600">Calendar</p><h3 className="mt-1 text-3xl font-black">{editingEvent ? 'Edit Event' : 'Add Event'}</h3></div>
+          <button onClick={onClose} className="rounded-xl p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-900"><X className="h-5 w-5" /></button>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          <label className="md:col-span-2"><span className="mb-2 block text-sm font-black text-slate-600">Title</span><input autoFocus value={form.title} onChange={(e) => setForm((current) => ({ ...current, title: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-blue-600" placeholder="Deposition, call client, court hearing..." /></label>
+          <label><span className="mb-2 block text-sm font-black text-slate-600">Type</span><select value={form.eventType} onChange={(e) => setForm((current) => ({ ...current, eventType: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-blue-600">{EVENT_TYPES.map((type) => <option key={type}>{type}</option>)}</select></label>
+          <label><span className="mb-2 block text-sm font-black text-slate-600">Link Client (optional)</span><select value={form.clientId || ''} onChange={(e) => setForm((current) => ({ ...current, clientId: e.target.value || null }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-blue-600"><option value="">No linked client</option>{clients.map((client) => <option key={client.id} value={client.id}>{clientName(client)}</option>)}</select></label>
+          <label><span className="mb-2 block text-sm font-black text-slate-600">Starts</span><input type="datetime-local" value={form.startAt} onChange={(e) => setForm((current) => ({ ...current, startAt: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-blue-600" /></label>
+          <label><span className="mb-2 block text-sm font-black text-slate-600">Ends (optional)</span><input type="datetime-local" value={form.endAt} onChange={(e) => setForm((current) => ({ ...current, endAt: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-blue-600" /></label>
+          <label className="md:col-span-2"><span className="mb-2 block text-sm font-black text-slate-600">Location (optional)</span><input value={form.location} onChange={(e) => setForm((current) => ({ ...current, location: e.target.value }))} className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-blue-600" placeholder="Court, office, Zoom, phone..." /></label>
+          <label className="md:col-span-2"><span className="mb-2 block text-sm font-black text-slate-600">Notes (optional)</span><textarea value={form.notes} onChange={(e) => setForm((current) => ({ ...current, notes: e.target.value }))} className="min-h-28 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 outline-none focus:border-blue-600" placeholder="Anything the office needs to know..." /></label>
+        </div>
+        <div className="mt-6 flex flex-col-reverse justify-between gap-3 sm:flex-row">
+          {editingEvent ? <button onClick={() => onDelete(editingEvent)} className="flex items-center justify-center gap-2 rounded-2xl border border-red-200 bg-red-50 px-5 py-3 font-black text-red-700 hover:bg-red-100"><Trash2 className="h-4 w-4" /> Delete</button> : <div />}
+          <div className="flex gap-3"><button onClick={onClose} className="rounded-2xl border border-slate-200 bg-white px-5 py-3 font-black text-slate-600">Cancel</button><button onClick={onSave} disabled={!form.title.trim() || !form.startAt} className="rounded-2xl bg-blue-600 px-5 py-3 font-black text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">Save Event</button></div>
+        </div>
+      </motion.div>
+    </div>
   );
 }
 
