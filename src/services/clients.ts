@@ -63,3 +63,13 @@ export async function softDeleteClient(id: string) {
     })
     .eq("id", id);
 }
+
+export async function restoreClient(id: string) {
+  return supabase
+    .from("clients")
+    .update({
+      deleted_at: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", id);
+}
