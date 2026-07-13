@@ -1,4 +1,5 @@
 import { supabase } from "@/lib/supabase";
+import { indexUploadedFile } from "@/services/document-index";
 
 const BUCKET = "client-files";
 
@@ -44,7 +45,7 @@ export async function uploadClientFile(input: {
     return { data: null, error: uploadResult.error };
   }
 
-  return supabase
+  const insertResult = await supabase
     .from("files")
     .insert({
       client_id: input.clientId,
@@ -57,6 +58,23 @@ export async function uploadClientFile(input: {
     })
     .select()
     .single();
+
+  if (insertResult.error || !insertResult.data) return insertResult;
+
+  try {
+    const indexResult = await indexUploadedFile({
+      fileId: insertResult.data.id,
+      clientId: input.clientId,
+      file: input.file,
+    });
+    if (indexResult.error) {
+      console.warn("File uploaded, but searchable text could not be saved:", indexResult.error);
+    }
+  } catch (indexError) {
+    console.warn("File uploaded, but PDF indexing failed:", indexError);
+  }
+
+  return insertResult;
 }
 
 export async function getSignedFileUrl(storagePath: string) {

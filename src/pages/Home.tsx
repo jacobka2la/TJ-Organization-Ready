@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import AIClientImport from "@/components/AIClientImport";
+import CaseAI from "@/components/CaseAI";
 import { getCurrentSession, loginWithEmail, logout } from "@/services/auth";
 import {
   createEvent as createEventInDb,
@@ -1709,6 +1710,27 @@ const deleteFolderFile = async (fileId: string) => {
             showNotes
           >
             <section className="space-y-6">
+              <CaseAI
+                clientId={selectedClient.id}
+                clientName={clientName(selectedClient)}
+                files={[
+                  ...selectedClient.folders.flatMap((folder) => folder.files),
+                  ...selectedClient.extraFiles,
+                ]}
+                onOpenSource={(fileId) => {
+                  const folderMatch = selectedClient.folders.find((folder) =>
+                    folder.files.some((file) => file.id === fileId),
+                  );
+                  const file = folderMatch
+                    ? folderMatch.files.find((item) => item.id === fileId)
+                    : selectedClient.extraFiles.find((item) => item.id === fileId);
+
+                  if (!file) return;
+                  if (folderMatch) setAppView("folder-file", selectedClient.id, folderMatch.id);
+                  void handlePreviewFile(file);
+                }}
+              />
+
               <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
                   <Search className="h-5 w-5 text-slate-400" />
