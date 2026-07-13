@@ -30,12 +30,10 @@ export async function getIndexedFileIds(clientId: string): Promise<{
     };
   }
 
-  const uniqueIds = Array.from(
-    new Set((data || []).map((row) => row.file_id)),
-  );
-
   return {
-    data: uniqueIds,
+    data: Array.from(
+      new Set((data || []).map((row) => String(row.file_id))),
+    ),
     error: null,
   };
 }
@@ -43,12 +41,41 @@ export async function getIndexedFileIds(clientId: string): Promise<{
 export async function searchCaseDocuments(
   clientId: string,
   question: string,
-) {
-  return supabase.rpc("search_case_documents", {
-    target_client_id: clientId,
-    search_query: question,
-    result_limit: 15,
-  });
+  resultLimit = 20,
+): Promise<{
+  data: CaseSearchResult[] | null;
+  error: Error | null;
+}> {
+  const { data, error } = await supabase.rpc(
+    "search_case_documents",
+    {
+      target_client_id: clientId,
+      search_query: question,
+      result_limit: resultLimit,
+    },
+  );
+
+  if (error) {
+    return {
+      data: null,
+      error: new Error(error.message),
+    };
+  }
+
+  return {
+    data: (data || []) as CaseSearchResult[],
+    error: null,
+  };
+}
+
+export async function findInCaseFiles(input: {
+  clientId: string;
+  query: string;
+}): Promise<{
+  data: CaseSearchResult[] | null;
+  error: Error | null;
+}> {
+  return searchCaseDocuments(input.clientId, input.query, 30);
 }
 
 export async function askCaseAI(input: {
@@ -59,23 +86,26 @@ export async function askCaseAI(input: {
   data: CaseAIAnswer | null;
   error: Error | null;
 }> {
-  const { data: matches, error: searchError } =
-    await searchCaseDocuments(input.clientId, input.question);
+  const searchResponse = await searchCaseDocuments(
+    input.clientId,
+    input.question,
+    20,
+  );
 
-  if (searchError) {
+  if (searchResponse.error) {
     return {
       data: null,
-      error: new Error(searchError.message),
+      error: searchResponse.error,
     };
   }
 
-  const sources = (matches || []) as CaseSearchResult[];
+  const sources = searchResponse.data || [];
 
   if (sources.length === 0) {
     return {
       data: {
         answer:
-          "I couldn’t find a matching section in this client’s searchable files. Some PDFs may be scanned images without selectable text, or the wording may not appear directly in the documents.",
+          "I couldn’t find a matching section in this client’s searchable files. The wording may not appear in the documents, or the information may be inside a scanned PDF without selectable text.",
         sources: [],
       },
       error: null,
