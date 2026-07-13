@@ -766,6 +766,15 @@ export default function Home() {
   setLoginPassword("");
 };
 
+  const openCaseAISource = (fileId: string) => {
+    if (!selectedClient) return;
+    const file = [
+      ...selectedClient.extraFiles,
+      ...selectedClient.folders.flatMap((folder) => folder.files),
+    ].find((item) => item.id === fileId);
+    if (file) void handlePreviewFile(file);
+  };
+
   const handlePreviewFile = async (file: StoredFile) => {
     if (file.storagePath && !file.dataUrl) {
       const { data, error } = await getSignedFileUrl(file.storagePath);
@@ -1710,26 +1719,7 @@ const deleteFolderFile = async (fileId: string) => {
             showNotes
           >
             <section className="space-y-6">
-              <CaseAI
-                clientId={selectedClient.id}
-                clientName={clientName(selectedClient)}
-                files={[
-                  ...selectedClient.folders.flatMap((folder) => folder.files),
-                  ...selectedClient.extraFiles,
-                ]}
-                onOpenSource={(fileId) => {
-                  const folderMatch = selectedClient.folders.find((folder) =>
-                    folder.files.some((file) => file.id === fileId),
-                  );
-                  const file = folderMatch
-                    ? folderMatch.files.find((item) => item.id === fileId)
-                    : selectedClient.extraFiles.find((item) => item.id === fileId);
-
-                  if (!file) return;
-                  if (folderMatch) setAppView("folder-file", selectedClient.id, folderMatch.id);
-                  void handlePreviewFile(file);
-                }}
-              />
+              
 
               <div className="rounded-3xl border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
@@ -1861,6 +1851,17 @@ const deleteFolderFile = async (fileId: string) => {
                   }
                 />
               </div>
+                  
+                  <CaseAI
+  clientId={selectedClient.id}
+  clientName={clientName(selectedClient)}
+  files={[
+    ...selectedClient.extraFiles,
+    ...selectedClient.folders.flatMap((folder) => folder.files),
+  ]}
+  onOpenSource={openCaseAISource}
+/>
+              
             </section>
           </ClientShell>
         )}
