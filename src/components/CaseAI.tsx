@@ -1,17 +1,23 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Bot,
   FileSearch,
   LoaderCircle,
+  MessageCircle,
   Search,
   Send,
   Sparkles,
+  Trash2,
+  User,
 } from "lucide-react";
 import {
   askCaseAI,
+  clearCaseAIConversation,
   findInCaseFiles,
+  getCaseAIMessages,
   getIndexedFileIds,
-  type CaseAIAnswer,
+  saveCaseAIMessage,
+  type CaseAIMessage,
   type CaseSearchResult,
 } from "@/services/case-ai";
 import { getSignedFileUrl } from "@/services/files";
@@ -94,15 +100,45 @@ export default function CaseAI({
 }: Props) {
   const [mode, setMode] = useState<Mode>("ask");
   const [question, setQuestion] = useState("");
-  const [answerResult, setAnswerResult] =
-    useState<CaseAIAnswer | null>(null);
+  const [messages, setMessages] = useState<CaseAIMessage[]>([]);
   const [findResults, setFindResults] = useState<CaseSearchResult[]>(
     [],
   );
   const [loading, setLoading] = useState(false);
+  const [conversationLoading, setConversationLoading] =
+    useState(false);
   const [indexing, setIndexing] = useState(false);
   const [indexMessage, setIndexMessage] = useState("");
   const [error, setError] = useState("");
+
+  const conversationEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const loadConversation = async () => {
+      setConversationLoading(true);
+      setMessages([]);
+      setError("");
+
+      const response = await getCaseAIMessages(clientId);
+
+      if (response.error) {
+        setError(response.error.message);
+      } else {
+        setMessages(response.data || []);
+      }
+
+      setConversationLoading(false);
+    };
+
+    void loadConversation();
+  }, [clientId]);
+
+  useEffect(() => {
+    conversationEndRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "end",
+    });
+  }, [messages, loading]);
 
   useEffect(() => {
     const automaticallyIndexMissingPdfs = async () => {
@@ -192,7 +228,7 @@ export default function CaseAI({
 
         setIndexMessage(
           unreadableCount > 0
-            ? `${unreadableCount} scanned or unreadable PDF${
+            ? `${unreadableCount} PDF${
                 unreadableCount === 1 ? "" : "s"
               } could not be searched.`
             : "",
@@ -212,9 +248,30 @@ export default function CaseAI({
 
   const changeMode = (nextMode: Mode) => {
     setMode(nextMode);
-    setAnswerResult(null);
     setFindResults([]);
     setError("");
+  };
+
+  const clearConversation = async () => {
+    const confirmed = window.confirm(
+      "Clear this AI conversation?\n\nThe AI will forget the current discussion and you can begin a new topic.",
+    );
+
+    if (!confirmed) {
+      return;
+    }
+
+    setError("");
+
+    const response = await clearCaseAIConversation(clientId);
+
+    if (response.error) {
+      setError(response.error.message);
+      return;
+    }
+
+    setMessages([]);
+    setQuestion("");
   };
 
   const submit = async (value = question) => {
@@ -224,25 +281,12 @@ export default function CaseAI({
       return;
     }
 
-    setQuestion(clean);
+    setQuestion("");
     setLoading(true);
     setError("");
-    setAnswerResult(null);
     setFindResults([]);
 
-    if (mode === "ask") {
-      const response = await askCaseAI({
-        clientId,
-        clientName,
-        question: clean,
-      });
-
-      if (response.error) {
-        setError(response.error.message);
-      } else {
-        setAnswerResult(response.data);
-      }
-    } else {
+    if (mode === "find") {
       const response = await findInCaseFiles({
         clientId,
         query: clean,
@@ -251,8 +295,111 @@ export default function CaseAI({
       if (response.error) {
         setError(response.error.message);
       } else {
+        setQuestion(clean);
         setFindResults(response.data || []);
       }
+
+      setLoading(false);
+      return;
+    }
+
+    const temporaryUserMessage: CaseAIMessage = {
+      id: `temporary-user-${Date.now()}`,
+      client_id: clientId,
+      role: "user",
+      content: clean,
+      sources: [],
+      created_at: new Date().toISOString(),
+    };
+
+    setMessages((current) => [...current, temporaryUserMessage]);
+
+    const savedUserResponse = await saveCaseAIMessage({
+      clientId,
+      role: "user",
+      content: clean,
+    });
+
+    if (savedUserResponse.error) {
+      setError(savedUserResponse.error.message);
+      setMessages((current) =>
+        current.filter(
+          (message) => message.id !== temporaryUserMessage.id,
+        ),
+      );
+      setLoading(false);
+      return;
+    }
+
+    const conversationHistory = messages.map((message) => ({
+      role: message.role,
+      content: message.content,
+    }));
+
+    const aiResponse = await askCaseAI({
+      clientId,
+      clientName,
+      question: clean,
+      conversation: conversationHistory,
+    });
+
+    if (aiResponse.error || !aiResponse.data) {
+      setError(
+        aiResponse.error?.message ||
+          "Case AI could not answer right now.",
+      );
+
+      setMessages((current) =>
+        current.map((message) =>
+          message.id === temporaryUserMessage.id &&
+          savedUserResponse.data
+            ? savedUserResponse.data
+            : message,
+        ),
+      );
+
+      setLoading(false);
+      return;
+    }
+
+    const savedAssistantResponse = await saveCaseAIMessage({
+      clientId,
+      role: "assistant",
+      content: aiResponse.data.answer,
+      sources: aiResponse.data.sources,
+    });
+
+    setMessages((current) => {
+      const withoutTemporary = current.filter(
+        (message) => message.id !== temporaryUserMessage.id,
+      );
+
+      const savedUser = savedUserResponse.data
+        ? [savedUserResponse.data]
+        : [temporaryUserMessage];
+
+      const assistantMessage: CaseAIMessage =
+        savedAssistantResponse.data || {
+          id: `temporary-assistant-${Date.now()}`,
+          client_id: clientId,
+          role: "assistant",
+          content: aiResponse.data!.answer,
+          sources: aiResponse.data!.sources,
+          created_at: new Date().toISOString(),
+        };
+
+      return [
+        ...withoutTemporary,
+        ...savedUser,
+        assistantMessage,
+      ];
+    });
+
+    if (savedAssistantResponse.error) {
+      console.warn(
+        "Answer displayed but could not be saved:",
+        savedAssistantResponse.error,
+      );
     }
 
     setLoading(false);
@@ -262,32 +409,45 @@ export default function CaseAI({
 
   return (
     <section className="rounded-3xl border border-violet-200 bg-gradient-to-br from-white to-violet-50 p-5 shadow-sm">
-      <div className="flex items-start gap-3">
-        <div className="rounded-2xl bg-violet-600 p-3 text-white">
-          {mode === "ask" ? (
-            <Bot className="h-6 w-6" />
-          ) : (
-            <Search className="h-6 w-6" />
-          )}
+      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
+        <div className="flex items-start gap-3">
+          <div className="rounded-2xl bg-violet-600 p-3 text-white">
+            {mode === "ask" ? (
+              <Bot className="h-6 w-6" />
+            ) : (
+              <Search className="h-6 w-6" />
+            )}
+          </div>
+
+          <div>
+            <p className="text-xs font-black uppercase tracking-[0.22em] text-violet-600">
+              TJY Case AI
+            </p>
+
+            <h3 className="text-2xl font-black">
+              {mode === "ask"
+                ? "Case conversation"
+                : "Find in this client’s files"}
+            </h3>
+
+            <p className="mt-1 text-sm text-slate-500">
+              {mode === "ask"
+                ? "Ask follow-up questions. The conversation is saved until you clear it."
+                : "Find relevant filenames, pages, and matching passages."}
+            </p>
+          </div>
         </div>
 
-        <div>
-          <p className="text-xs font-black uppercase tracking-[0.22em] text-violet-600">
-            TJY Case AI
-          </p>
-
-          <h3 className="text-2xl font-black">
-            {mode === "ask"
-              ? "Ask this client’s file"
-              : "Find in this client’s files"}
-          </h3>
-
-          <p className="mt-1 text-sm text-slate-500">
-            {mode === "ask"
-              ? "Get an answer based only on this client’s documents."
-              : "Find every relevant filename, page, and matching passage."}
-          </p>
-        </div>
+        {mode === "ask" && messages.length > 0 && (
+          <button
+            onClick={() => void clearConversation()}
+            disabled={loading}
+            className="flex shrink-0 items-center justify-center gap-2 rounded-xl border border-red-200 bg-white px-3 py-2 text-xs font-black text-red-600 hover:bg-red-50 disabled:opacity-40"
+          >
+            <Trash2 className="h-4 w-4" />
+            Clear Conversation
+          </button>
+        )}
       </div>
 
       <div className="mt-5 grid grid-cols-2 rounded-2xl bg-violet-100 p-1">
@@ -323,6 +483,45 @@ export default function CaseAI({
         </div>
       )}
 
+      {mode === "ask" && (
+        <div className="mt-4 max-h-[560px] space-y-4 overflow-y-auto rounded-2xl border border-violet-100 bg-white/70 p-4">
+          {conversationLoading ? (
+            <div className="flex items-center justify-center gap-2 py-10 text-sm font-bold text-violet-600">
+              <LoaderCircle className="h-5 w-5 animate-spin" />
+              Loading conversation...
+            </div>
+          ) : messages.length === 0 ? (
+            <div className="py-8 text-center">
+              <MessageCircle className="mx-auto h-9 w-9 text-violet-300" />
+              <p className="mt-3 font-black text-slate-700">
+                Start a new conversation
+              </p>
+              <p className="mt-1 text-sm text-slate-500">
+                Ask about providers, bills, treatment, injuries,
+                insurance, discovery, or any other current case file.
+              </p>
+            </div>
+          ) : (
+            messages.map((message) => (
+              <ConversationMessage
+                key={message.id}
+                message={message}
+                onOpenSource={onOpenSource}
+              />
+            ))
+          )}
+
+          {loading && (
+            <div className="flex items-center gap-2 rounded-2xl bg-violet-50 p-4 font-bold text-violet-700">
+              <Sparkles className="h-5 w-5" />
+              Reviewing the current case files...
+            </div>
+          )}
+
+          <div ref={conversationEndRef} />
+        </div>
+      )}
+
       <div className="mt-4 flex gap-2">
         <input
           value={question}
@@ -334,7 +533,9 @@ export default function CaseAI({
           }}
           placeholder={
             mode === "ask"
-              ? "Ask anything about this case..."
+              ? messages.length > 0
+                ? "Ask a follow-up question..."
+                : "Ask anything about this case..."
               : "Search for pain, providers, insurance, statements..."
           }
           className="min-w-0 flex-1 rounded-2xl border border-slate-200 bg-white px-4 py-3 font-semibold outline-none focus:border-violet-500"
@@ -342,7 +543,12 @@ export default function CaseAI({
 
         <button
           onClick={() => void submit()}
-          disabled={loading || indexing || !question.trim()}
+          disabled={
+            loading ||
+            indexing ||
+            conversationLoading ||
+            !question.trim()
+          }
           className="rounded-2xl bg-violet-600 px-4 text-white hover:bg-violet-700 disabled:opacity-40"
         >
           {loading ? (
@@ -355,12 +561,12 @@ export default function CaseAI({
         </button>
       </div>
 
-      {!answerResult &&
-        findResults.length === 0 &&
-        !loading &&
-        !error && (
+      {mode === "ask" &&
+        messages.length === 0 &&
+        !conversationLoading &&
+        !loading && (
           <div className="mt-3 flex flex-wrap gap-2">
-            {examples.map((example) => (
+            {askExamples.map((example) => (
               <button
                 key={example}
                 onClick={() => void submit(example)}
@@ -373,33 +579,27 @@ export default function CaseAI({
           </div>
         )}
 
-      {loading && (
-        <div className="mt-5 flex items-center gap-2 rounded-2xl bg-white p-4 font-bold text-violet-700">
-          <Sparkles className="h-5 w-5" />
-          {mode === "ask"
-            ? "Reviewing the case file..."
-            : "Searching every indexed page..."}
-        </div>
-      )}
+      {mode === "find" &&
+        findResults.length === 0 &&
+        !loading &&
+        !error && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {findExamples.map((example) => (
+              <button
+                key={example}
+                onClick={() => void submit(example)}
+                disabled={indexing}
+                className="rounded-full border border-violet-200 bg-white px-3 py-1.5 text-xs font-bold text-violet-700 hover:bg-violet-100 disabled:opacity-40"
+              >
+                {example}
+              </button>
+            ))}
+          </div>
+        )}
 
       {error && (
         <div className="mt-5 rounded-2xl border border-red-200 bg-red-50 p-4 text-sm font-bold text-red-700">
           {error}
-        </div>
-      )}
-
-      {mode === "ask" && answerResult && (
-        <div className="mt-5 space-y-4">
-          <div className="whitespace-pre-wrap rounded-2xl border border-violet-100 bg-white p-4 leading-7 text-slate-700">
-            {answerResult.answer}
-          </div>
-
-          {answerResult.sources.length > 0 && (
-            <SourceButtons
-              sources={answerResult.sources}
-              onOpenSource={onOpenSource}
-            />
-          )}
         </div>
       )}
 
@@ -455,41 +655,64 @@ export default function CaseAI({
   );
 }
 
-function SourceButtons({
-  sources,
+function ConversationMessage({
+  message,
   onOpenSource,
 }: {
-  sources: CaseSearchResult[];
+  message: CaseAIMessage;
   onOpenSource: (fileId: string) => void;
 }) {
+  const isUser = message.role === "user";
+
   return (
-    <div>
-      <p className="mb-2 text-xs font-black uppercase tracking-[0.18em] text-slate-500">
-        Sources
-      </p>
+    <div
+      className={`flex gap-3 ${
+        isUser ? "justify-end" : "justify-start"
+      }`}
+    >
+      {!isUser && (
+        <div className="mt-1 h-fit rounded-xl bg-violet-600 p-2 text-white">
+          <Bot className="h-4 w-4" />
+        </div>
+      )}
 
-      <div className="grid gap-2">
-        {sources.slice(0, 10).map((source) => (
-          <button
-            key={`${source.file_id}-${source.page_number}`}
-            onClick={() => onOpenSource(source.file_id)}
-            className="flex items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-3 text-left hover:border-violet-300 hover:bg-violet-50"
-          >
-            <div className="min-w-0">
-              <p className="truncate text-sm font-black">
-                {source.file_name}
-              </p>
+      <div
+        className={`max-w-[88%] rounded-2xl p-4 ${
+          isUser
+            ? "bg-violet-600 text-white"
+            : "border border-slate-200 bg-white text-slate-700"
+        }`}
+      >
+        <div className="whitespace-pre-wrap text-sm leading-7">
+          {message.content}
+        </div>
 
-              <p className="text-xs text-slate-500">
-                {source.folder_name || "Extra Files"} · Page{" "}
-                {source.page_number}
-              </p>
+        {!isUser && message.sources.length > 0 && (
+          <div className="mt-4 border-t border-slate-100 pt-3">
+            <p className="mb-2 text-[10px] font-black uppercase tracking-[0.16em] text-slate-400">
+              Current Sources
+            </p>
+
+            <div className="flex flex-wrap gap-2">
+              {message.sources.slice(0, 8).map((source) => (
+                <button
+                  key={`${message.id}-${source.file_id}-${source.page_number}`}
+                  onClick={() => onOpenSource(source.file_id)}
+                  className="rounded-lg border border-violet-100 bg-violet-50 px-2.5 py-1.5 text-left text-[11px] font-bold text-violet-700 hover:bg-violet-100"
+                >
+                  {source.file_name} · p. {source.page_number}
+                </button>
+              ))}
             </div>
-
-            <FileSearch className="h-4 w-4 shrink-0 text-violet-600" />
-          </button>
-        ))}
+          </div>
+        )}
       </div>
+
+      {isUser && (
+        <div className="mt-1 h-fit rounded-xl bg-slate-200 p-2 text-slate-600">
+          <User className="h-4 w-4" />
+        </div>
+      )}
     </div>
   );
 }

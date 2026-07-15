@@ -14,6 +14,20 @@ export type CaseAIAnswer = {
   sources: CaseSearchResult[];
 };
 
+export type CaseAIMessage = {
+  id: string;
+  client_id: string;
+  role: "user" | "assistant";
+  content: string;
+  sources: CaseSearchResult[];
+  created_at: string;
+};
+
+export type ConversationMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
 export async function getIndexedFileIds(clientId: string): Promise<{
   data: string[] | null;
   error: Error | null;
@@ -35,6 +49,87 @@ export async function getIndexedFileIds(clientId: string): Promise<{
       new Set((data || []).map((row) => String(row.file_id))),
     ),
     error: null,
+  };
+}
+
+export async function getCaseAIMessages(clientId: string): Promise<{
+  data: CaseAIMessage[] | null;
+  error: Error | null;
+}> {
+  const { data, error } = await supabase
+    .from("case_ai_messages")
+    .select("*")
+    .eq("client_id", clientId)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    return {
+      data: null,
+      error: new Error(error.message),
+    };
+  }
+
+  return {
+    data: (data || []).map((message) => ({
+      ...message,
+      sources: Array.isArray(message.sources)
+        ? (message.sources as CaseSearchResult[])
+        : [],
+    })) as CaseAIMessage[],
+    error: null,
+  };
+}
+
+export async function saveCaseAIMessage(input: {
+  clientId: string;
+  role: "user" | "assistant";
+  content: string;
+  sources?: CaseSearchResult[];
+}): Promise<{
+  data: CaseAIMessage | null;
+  error: Error | null;
+}> {
+  const { data, error } = await supabase
+    .from("case_ai_messages")
+    .insert({
+      client_id: input.clientId,
+      role: input.role,
+      content: input.content,
+      sources: input.sources || [],
+    })
+    .select()
+    .single();
+
+  if (error || !data) {
+    return {
+      data: null,
+      error: new Error(
+        error?.message || "Could not save the conversation.",
+      ),
+    };
+  }
+
+  return {
+    data: {
+      ...data,
+      sources: Array.isArray(data.sources)
+        ? (data.sources as CaseSearchResult[])
+        : [],
+    } as CaseAIMessage,
+    error: null,
+  };
+}
+
+export async function clearCaseAIConversation(
+  clientId: string,
+): Promise<{ error: Error | null }> {
+  const { error } = await supabase
+    .from("case_ai_messages")
+    .delete()
+    .eq("client_id", clientId);
+
+  return {
+    error: error ? new Error(error.message) : null,
   };
 }
 
@@ -82,6 +177,7 @@ export async function askCaseAI(input: {
   clientId: string;
   clientName: string;
   question: string;
+  conversation: ConversationMessage[];
 }): Promise<{
   data: CaseAIAnswer | null;
   error: Error | null;
@@ -101,11 +197,17 @@ export async function askCaseAI(input: {
 
   const sources = searchResponse.data || [];
 
+  /*
+   * Follow-up questions such as "did they pay it?" may not contain
+   * enough useful search words. When that happens, the Edge Function
+   * still receives the conversation, but it must not treat prior AI
+   * answers as proof.
+   */
   if (sources.length === 0) {
     return {
       data: {
         answer:
-          "I couldn’t find a matching section in this client’s searchable files. The wording may not appear in the documents, or the information may be inside a scanned PDF without selectable text.",
+          "I couldn’t find current case-file support for that answer. Try including the provider, document, injury, or insurance company you’re referring to.",
         sources: [],
       },
       error: null,
@@ -118,6 +220,7 @@ export async function askCaseAI(input: {
       body: {
         clientName: input.clientName,
         question: input.question,
+        conversation: input.conversation.slice(-16),
         sources: sources.map((source, index) => ({
           sourceNumber: index + 1,
           fileName: source.file_name,
