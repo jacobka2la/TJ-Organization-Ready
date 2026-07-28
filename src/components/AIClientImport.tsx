@@ -1,3 +1,4 @@
+import { extractFileTextForAI } from "@/services/document-index";
 import { useMemo, useRef, useState } from "react";
 import * as pdfjs from "pdfjs-dist";
 import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
@@ -277,7 +278,13 @@ export default function AIClientImport({
       });
 
       try {
-        const result = await extractPdfText(file);
+        const aiText = await extractFileTextForAI(file);
+
+const result = {
+  extractedText: aiText.text,
+  hasExtractableText: aiText.text.length >= 20,
+  pageCount: aiText.totalPages,
+};
 
         extracted.push({
           file,

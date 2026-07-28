@@ -73,10 +73,9 @@ async function renderPageToCanvas(
   context.fillRect(0, 0, canvas.width, canvas.height);
 
   await page.render({
-    canvasContext: context,
-    viewport,
-    canvas,
-  }).promise;
+  canvasContext: context,
+  viewport,
+}).promise;
 
   return canvas;
 }
@@ -121,6 +120,85 @@ async function saveDocumentPages(
 
     if (insertError) {
       throw insertError;
+    }
+  }
+}
+
+export async function extractFileTextForAI(file: File): Promise<{
+  text: string;
+  totalPages: number;
+  ocrPages: number;
+}> {
+  if (!isPdf(file)) {
+    return {
+      text: "",
+      totalPages: 0,
+      ocrPages: 0,
+    };
+  }
+
+  let worker: Worker | null = null;
+
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+
+    const pdf = await pdfjs.getDocument({
+      data: bytes,
+      useWorkerFetch: false,
+      isEvalSupported: false,
+      useSystemFonts: true,
+    }).promise;
+
+    const pageTexts: string[] = [];
+    let ocrPages = 0;
+
+    for (
+      let pageNumber = 1;
+      pageNumber <= pdf.numPages;
+      pageNumber += 1
+    ) {
+      const page = await pdf.getPage(pageNumber);
+
+      let text = await extractSelectableText(page);
+
+      if (text.length < MIN_SELECTABLE_TEXT_LENGTH) {
+        if (!worker) {
+          worker = await createWorker("eng", 1);
+        }
+
+        try {
+          const ocrText = await recognizePage(worker, page);
+
+          if (ocrText.length > text.length) {
+            text = ocrText;
+          }
+
+          if (ocrText) {
+            ocrPages += 1;
+          }
+        } catch (ocrError) {
+          console.warn(
+            `OCR failed for ${file.name}, page ${pageNumber}:`,
+            ocrError,
+          );
+        }
+      }
+
+      if (text) {
+        pageTexts.push(`PAGE ${pageNumber}\n${text}`);
+      }
+
+      page.cleanup();
+    }
+
+    return {
+      text: pageTexts.join("\n\n").slice(0, 25000),
+      totalPages: pdf.numPages,
+      ocrPages,
+    };
+  } finally {
+    if (worker) {
+      await worker.terminate();
     }
   }
 }

@@ -1,3 +1,4 @@
+import { extractFileTextForAI } from "@/services/document-index";
 import { motion } from "framer-motion";
 import { ReactNode } from "react";
 
