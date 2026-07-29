@@ -1,7 +1,4 @@
-import { extractFileTextForAI } from "@/services/document-index";
 import { useMemo, useRef, useState } from "react";
-import * as pdfjs from "pdfjs-dist";
-import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import {
   AlertTriangle,
   Check,
@@ -17,7 +14,6 @@ import { createClient } from "@/services/clients";
 import { createFolder } from "@/services/folders";
 import { uploadClientFile } from "@/services/files";
 
-pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const ALLOWED_FOLDERS = [
   "Client Intake",
@@ -89,9 +85,7 @@ type ImportPlan = {
 type SelectedPdf = {
   file: File;
   originalFilename: string;
-  extractedText: string;
-  hasExtractableText: boolean;
-  pageCount: number;
+  pdfBase64: string;
 };
 
 type Props = {
@@ -130,47 +124,35 @@ const splitFullName = (fullName: string) => {
   };
 };
 
-async function extractPdfText(
-  file: File,
-): Promise<Omit<SelectedPdf, "file" | "originalFilename">> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
+async function fileToBase64(file: File): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
 
-  const loadingTask = pdfjs.getDocument({
-    data: bytes,
-    useWorkerFetch: false,
-    isEvalSupported: false,
-    useSystemFonts: true,
+    reader.onload = () => {
+      if (typeof reader.result !== "string") {
+        reject(new Error(`Could not read ${file.name}.`));
+        return;
+      }
+
+      const base64 = reader.result.split(",")[1];
+
+      if (!base64) {
+        reject(new Error(`Could not convert ${file.name} to base64.`));
+        return;
+      }
+
+      resolve(base64);
+    };
+
+    reader.onerror = () => {
+      reject(
+        reader.error ||
+          new Error(`Could not read ${file.name}.`),
+      );
+    };
+
+    reader.readAsDataURL(file);
   });
-
-  const pdf = await loadingTask.promise;
-  const pageTexts: string[] = [];
-
-  for (
-    let pageNumber = 1;
-    pageNumber <= pdf.numPages;
-    pageNumber += 1
-  ) {
-    const page = await pdf.getPage(pageNumber);
-    const content = await page.getTextContent();
-
-    const text = content.items
-      .map((item) => ("str" in item ? item.str : ""))
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    if (text) {
-      pageTexts.push(`PAGE ${pageNumber}\n${text}`);
-    }
-  }
-
-  const extractedText = pageTexts.join("\n\n").slice(0, 25000);
-
-  return {
-    extractedText,
-    hasExtractableText: extractedText.length >= 20,
-    pageCount: pdf.numPages,
-  };
 }
 
 export default function AIClientImport({
@@ -234,135 +216,229 @@ export default function AIClientImport({
     onClose();
   };
 
-  const handleFolderSelection = async (
-    event: React.ChangeEvent<HTMLInputElement>,
-  ) => {
-    const files = Array.from(event.target.files || []);
+ const handleFolderSelection = async (
+  event: React.ChangeEvent<HTMLInputElement>,
+) => {
+  const files = Array.from(event.target.files || []);
 
-    const pdfFiles = files.filter(
-      (file) =>
-        file.type === "application/pdf" ||
-        file.name.toLowerCase().endsWith(".pdf"),
-    );
+  const pdfFiles = files.filter(
+    (file) =>
+      file.type === "application/pdf" ||
+      file.name.toLowerCase().endsWith(".pdf"),
+  );
 
-    if (pdfFiles.length === 0) {
-      setError("That folder does not contain any PDFs.");
-      return;
-    }
+  if (pdfFiles.length === 0) {
+    setError("That folder does not contain any PDFs.");
+    return;
+  }
 
-    const relativePath =
-      (pdfFiles[0] as File & { webkitRelativePath?: string })
-        .webkitRelativePath || "";
+  const relativePath =
+    (pdfFiles[0] as File & { webkitRelativePath?: string })
+      .webkitRelativePath || "";
 
-    const detectedFolderName =
-      relativePath.split("/")[0] || "Imported Client";
+  const detectedFolderName =
+    relativePath.split("/")[0] || "Imported Client";
 
-    setError("");
-    setFolderName(detectedFolderName);
-    setStep("reading");
+  setError("");
+  setFolderName(detectedFolderName);
+  setStep("reading");
+
+  setProgress({
+    current: 0,
+    total: pdfFiles.length,
+    label: "Reading PDFs",
+  });
+
+  const preparedPdfs: SelectedPdf[] = [];
+
+  for (let index = 0; index < pdfFiles.length; index += 1) {
+    const file = pdfFiles[index];
+
     setProgress({
-      current: 0,
+      current: index + 1,
       total: pdfFiles.length,
-      label: "Reading PDFs",
+      label: `Reading ${file.name}`,
     });
 
-    const extracted: SelectedPdf[] = [];
+    try {
+      const pdfBase64 = await fileToBase64(file);
 
-    for (let index = 0; index < pdfFiles.length; index += 1) {
-      const file = pdfFiles[index];
-
-      setProgress({
-        current: index + 1,
-        total: pdfFiles.length,
-        label: `Reading ${file.name}`,
+      preparedPdfs.push({
+        file,
+        originalFilename: file.name,
+        pdfBase64,
       });
-
-      try {
-        const aiText = await extractFileTextForAI(file);
-
-const result = {
-  extractedText: aiText.text,
-  hasExtractableText: aiText.text.length >= 20,
-  pageCount: aiText.totalPages,
-};
-
-        extracted.push({
-          file,
-          originalFilename: file.name,
-          ...result,
-          extractedText: result.hasExtractableText
-            ? result.extractedText
-            : `[No extractable text was found. This appears to be a scanned or image-only PDF with ${result.pageCount} page(s). Classify cautiously using the filename and place it in Needs Review when uncertain.]`,
-        });
-      } catch (pdfError) {
-        console.error("PDF extraction failed:", file.name, pdfError);
-
-        extracted.push({
-          file,
-          originalFilename: file.name,
-          extractedText:
-            "[The PDF could not be read. Place this document in Needs Review.]",
-          hasExtractableText: false,
-          pageCount: 0,
-        });
-      }
-    }
-
-    setSelectedPdfs(extracted);
-    await analyzeFolder(detectedFolderName, extracted);
-  };
-
-  const analyzeFolder = async (
-    name: string,
-    pdfs: SelectedPdf[],
-  ) => {
-    setStep("analyzing");
-
-    setProgress({
-      current: 0,
-      total: 1,
-      label: "TJY AI is building the client file",
-    });
-
-    const { data, error: invokeError } = await supabase.functions.invoke(
-      "ai-build-import-plan",
-      {
-        body: {
-          folderName: name,
-          documents: pdfs.map((pdf) => ({
-            originalFilename: pdf.originalFilename,
-            documentText: pdf.extractedText,
-          })),
-        },
-      },
-    );
-
-    if (invokeError || !data?.success || !data?.plan) {
-      console.error("AI import plan error:", invokeError, data);
+    } catch (fileError) {
+      console.error("Could not read PDF:", file.name, fileError);
 
       setError(
-        data?.details?.error?.message ||
-          data?.error ||
-          invokeError?.message ||
-          "TJY AI could not analyze this folder.",
+        fileError instanceof Error
+          ? fileError.message
+          : `Could not read ${file.name}.`,
       );
 
       setStep("select");
       return;
     }
+  }
 
-    const nextPlan = data.plan as ImportPlan;
-    const fallbackName = splitFullName(name.replace(/[_-]+/g, " "));
+  setSelectedPdfs(preparedPdfs);
 
-    nextPlan.client.firstName =
-      nextPlan.client.firstName || fallbackName.firstName;
+  await analyzeFolder(
+    detectedFolderName,
+    preparedPdfs,
+  );
+};
 
-    nextPlan.client.lastName =
-      nextPlan.client.lastName || fallbackName.lastName;
+const analyzeFolder = async (
+  name: string,
+  pdfs: SelectedPdf[],
+) => {
+  setStep("analyzing");
+  setError("");
 
-    setPlan(nextPlan);
-    setStep("review");
+  const documentResults: ImportDocumentPlan[] = [];
+
+  for (let index = 0; index < pdfs.length; index += 1) {
+    const pdf = pdfs[index];
+
+    setProgress({
+      current: index + 1,
+      total: pdfs.length,
+      label: `Analyzing ${pdf.originalFilename}`,
+    });
+
+    const { data, error: invokeError } =
+      await supabase.functions.invoke(
+        "ai-classify-document",
+        {
+          body: {
+            originalFilename: pdf.originalFilename,
+            pdfBase64: pdf.pdfBase64,
+          },
+        },
+      );
+
+    if (
+      invokeError ||
+      !data?.success ||
+      !data?.classification
+    ) {
+      console.error(
+        "Document classification failed:",
+        pdf.originalFilename,
+        invokeError,
+        data,
+      );
+
+      documentResults.push({
+        originalFilename: pdf.originalFilename,
+        documentType: "Classification Failed",
+        suggestedFolder: "Needs Review",
+        suggestedFilename:
+          pdf.originalFilename.replace(/\.pdf$/i, ""),
+        confidence: 0,
+        needsReview: true,
+        reason:
+          data?.error ||
+          invokeError?.message ||
+          "The PDF could not be classified.",
+        clientNamesFound: [],
+        providerOrOrganization: null,
+        importantDateStart: null,
+        importantDateEnd: null,
+        includeDateInFilename: false,
+        possibleWrongClient: false,
+        possiblyUnrelated: false,
+      });
+
+      continue;
+    }
+
+    documentResults.push({
+      originalFilename: pdf.originalFilename,
+      ...data.classification,
+    });
+  }
+
+  const fallbackName = splitFullName(
+    name.replace(/[_-]+/g, " "),
+  );
+
+  const foundClientNames = documentResults
+    .flatMap((document) => document.clientNamesFound || [])
+    .filter(Boolean);
+
+  const mostCommonClientName =
+    foundClientNames.length > 0
+      ? foundClientNames
+          .sort(
+            (a, b) =>
+              foundClientNames.filter((name) => name === b)
+                .length -
+              foundClientNames.filter((name) => name === a)
+                .length,
+          )[0]
+      : null;
+
+  const detectedName = mostCommonClientName
+    ? splitFullName(mostCommonClientName)
+    : fallbackName;
+
+  const foldersToCreate = ALLOWED_FOLDERS.filter(
+    (folder) =>
+      documentResults.some(
+        (document) =>
+          document.suggestedFolder === folder,
+      ),
+  );
+
+  const nextPlan: ImportPlan = {
+    client: {
+      fullName: mostCommonClientName || name,
+      firstName: detectedName.firstName,
+      lastName: detectedName.lastName,
+      dateOfBirth: null,
+      phone: null,
+      email: null,
+      address: null,
+      caseType: "Personal Injury",
+      confidence: mostCommonClientName ? 0.8 : 0.5,
+      needsReview: !mostCommonClientName,
+      reason: mostCommonClientName
+        ? "The client name was found across the classified documents."
+        : "The client name was taken from the selected folder name.",
+    },
+    foldersToCreate,
+    documents: documentResults,
+    summary: {
+      totalDocuments: documentResults.length,
+      readyToImport: documentResults.filter(
+        (document) => !document.needsReview,
+      ).length,
+      needsReview: documentResults.filter(
+        (document) => document.needsReview,
+      ).length,
+      possibleWrongClientFiles: documentResults
+        .filter(
+          (document) => document.possibleWrongClient,
+        )
+        .map(
+          (document) => document.originalFilename,
+        ),
+      possibleUnrelatedFiles: documentResults
+        .filter(
+          (document) => document.possiblyUnrelated,
+        )
+        .map(
+          (document) => document.originalFilename,
+        ),
+    },
   };
+
+  setPlan(nextPlan);
+  setStep("review");
+};
 
   const updateClient = (
     field: keyof ImportPlan["client"],
