@@ -13,10 +13,61 @@
     <meta name="twitter:card" content="summary" />
     <meta name="twitter:title" content="TJ Organization | Private Legal File Workspace" />
     <meta name="twitter:description" content="Private login-only case file organization workspace." />
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   </head>
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+      (() => {
+        const SEARCH_ID = "tj-folder-file-search";
+
+        const addFolderSearch = () => {
+          if (!window.location.pathname.includes("/folder/")) return;
+          if (document.getElementById(SEARCH_ID)) return;
+
+          const uploadLabel = Array.from(document.querySelectorAll("p")).find(
+            (node) => node.textContent?.trim() === "Upload files to this folder",
+          );
+          if (!uploadLabel) return;
+
+          const uploadBox = uploadLabel.closest('[role="button"]');
+          if (!uploadBox || !uploadBox.parentElement) return;
+
+          const folderCard = uploadBox.parentElement;
+          const searchWrap = document.createElement("div");
+          searchWrap.id = SEARCH_ID;
+          searchWrap.className =
+            "mb-4 flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3";
+          searchWrap.innerHTML = `
+            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-slate-400" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></svg>
+            <input type="search" aria-label="Search files in this folder" placeholder="Search files in this folder..." class="w-full bg-transparent outline-none" />
+          `;
+
+          uploadBox.insertAdjacentElement("afterend", searchWrap);
+          const input = searchWrap.querySelector("input");
+
+          const filterFiles = () => {
+            const query = input.value.trim().toLowerCase();
+            const fileCards = folderCard.querySelectorAll("article");
+            fileCards.forEach((card) => {
+              const filename =
+                card.querySelector('[title]')?.getAttribute("title") ||
+                card.querySelector("p")?.textContent ||
+                "";
+              card.style.display =
+                !query || filename.toLowerCase().includes(query) ? "" : "none";
+            });
+          };
+
+          input.addEventListener("input", filterFiles);
+        };
+
+        const observer = new MutationObserver(addFolderSearch);
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+        window.addEventListener("popstate", () => setTimeout(addFolderSearch, 0));
+        addFolderSearch();
+      })();
+    </script>
   </body>
 </html>
