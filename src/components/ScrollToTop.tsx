@@ -2,8 +2,32 @@ import { useEffect } from "react";
 
 const ScrollToTop = () => {
   useEffect(() => {
-    const scrollToTop = () => {
-      window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+    const scrollForCurrentView = () => {
+      const isFolderView = /^\/client\/[^/]+\/folder\/[^/]+\/?$/.test(
+        window.location.pathname,
+      );
+
+      if (!isFolderView) {
+        window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+        return;
+      }
+
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => {
+          const folderContent = document.querySelector<HTMLElement>(
+            "section.space-y-6",
+          );
+
+          if (folderContent) {
+            folderContent.scrollIntoView({
+              behavior: "auto",
+              block: "start",
+            });
+          } else {
+            window.scrollTo({ top: 0, left: 0, behavior: "auto" });
+          }
+        });
+      });
     };
 
     const originalPushState = window.history.pushState.bind(window.history);
@@ -11,21 +35,21 @@ const ScrollToTop = () => {
 
     window.history.pushState = (...args) => {
       originalPushState(...args);
-      scrollToTop();
+      scrollForCurrentView();
     };
 
     window.history.replaceState = (...args) => {
       originalReplaceState(...args);
-      scrollToTop();
+      scrollForCurrentView();
     };
 
-    window.addEventListener("popstate", scrollToTop);
-    scrollToTop();
+    window.addEventListener("popstate", scrollForCurrentView);
+    scrollForCurrentView();
 
     return () => {
       window.history.pushState = originalPushState;
       window.history.replaceState = originalReplaceState;
-      window.removeEventListener("popstate", scrollToTop);
+      window.removeEventListener("popstate", scrollForCurrentView);
     };
   }, []);
 
