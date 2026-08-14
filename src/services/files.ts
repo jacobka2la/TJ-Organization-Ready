@@ -1,5 +1,4 @@
 import { supabase } from "@/lib/supabase";
-import { indexUploadedFile } from "@/services/document-index";
 
 const BUCKET = "client-files";
 
@@ -59,21 +58,9 @@ export async function uploadClientFile(input: {
     .select()
     .single();
 
-  if (insertResult.error || !insertResult.data) return insertResult;
-
-  try {
-    const indexResult = await indexUploadedFile({
-      fileId: insertResult.data.id,
-      clientId: input.clientId,
-      file: input.file,
-    });
-    if (indexResult.error) {
-      console.warn("File uploaded, but searchable text could not be saved:", indexResult.error);
-    }
-  } catch (indexError) {
-    console.warn("File uploaded, but PDF indexing failed:", indexError);
-  }
-
+  // Return as soon as the upload + database record are saved so the file
+  // appears in the client folder immediately. CaseAI handles searchable PDF
+  // indexing separately in the background when it sees an unindexed PDF.
   return insertResult;
 }
 
