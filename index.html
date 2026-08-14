@@ -52,8 +52,8 @@
             const fileCards = folderCard.querySelectorAll("article");
             fileCards.forEach((card) => {
               const filename =
-                card.querySelector('[title]')?.getAttribute("title") ||
-                card.querySelector("p")?.textContent ||
+                card.querySelector("p[title]")?.getAttribute("title") ||
+                card.querySelector("p.font-black")?.textContent ||
                 "";
               card.style.display =
                 !query || filename.toLowerCase().includes(query) ? "" : "none";
