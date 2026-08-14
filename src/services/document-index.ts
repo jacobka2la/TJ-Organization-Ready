@@ -28,7 +28,9 @@ type DocumentPageRow = {
 
 const MIN_SELECTABLE_TEXT_LENGTH = 35;
 const OCR_RENDER_SCALE = 1.8;
-const INSERT_BATCH_SIZE = 100;
+const INSERT_BATCH_SIZE = 25;
+const OCR_TIMEOUT_MS = 20000;
+const OCR_WORKER_TIMEOUT_MS = 15000;
 
 const isPdf = (file: File) =>
   file.type === "application/pdf" ||
@@ -36,6 +38,24 @@ const isPdf = (file: File) =>
 
 const normalizeText = (value: string) =>
   value.replace(/\s+/g, " ").trim();
+
+const withTimeout = async <T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> => {
+  let timeoutId: number | undefined;
+
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutId = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+  }
+};
 
 async function extractSelectableText(
   page: Awaited<ReturnType<Awaited<ReturnType<typeof pdfjs.getDocument>["promise"]>["getPage"]>>,
@@ -52,31 +72,21 @@ async function extractSelectableText(
 async function renderPageToCanvas(
   page: Awaited<ReturnType<Awaited<ReturnType<typeof pdfjs.getDocument>["promise"]>["getPage"]>>,
 ) {
-  const viewport = page.getViewport({
-    scale: OCR_RENDER_SCALE,
-  });
-
+  const viewport = page.getViewport({ scale: OCR_RENDER_SCALE });
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("2d", {
     alpha: false,
     willReadFrequently: true,
   });
 
-  if (!context) {
-    throw new Error("Could not create the OCR canvas.");
-  }
+  if (!context) throw new Error("Could not create the OCR canvas.");
 
   canvas.width = Math.ceil(viewport.width);
   canvas.height = Math.ceil(viewport.height);
-
   context.fillStyle = "#ffffff";
   context.fillRect(0, 0, canvas.width, canvas.height);
 
-  await page.render({
-  canvasContext: context,
-  viewport,
-}).promise;
-
+  await page.render({ canvasContext: context, viewport }).promise;
   return canvas;
 }
 
@@ -87,7 +97,11 @@ async function recognizePage(
   const canvas = await renderPageToCanvas(page);
 
   try {
-    const result = await worker.recognize(canvas);
+    const result = await withTimeout(
+      worker.recognize(canvas),
+      OCR_TIMEOUT_MS,
+      "OCR timed out for this page.",
+    );
     return normalizeText(result.data.text || "");
   } finally {
     canvas.width = 1;
@@ -96,32 +110,42 @@ async function recognizePage(
   }
 }
 
-async function saveDocumentPages(
-  fileId: string,
-  rows: DocumentPageRow[],
-) {
-  const { error: deleteError } = await supabase
+async function clearDocumentPages(fileId: string) {
+  const { error } = await supabase
     .from("document_pages")
     .delete()
     .eq("file_id", fileId);
+  if (error) throw error;
+}
 
-  if (deleteError) {
-    throw deleteError;
-  }
+async function insertDocumentPages(rows: DocumentPageRow[]) {
+  if (rows.length === 0) return;
 
-  for (
-    let start = 0;
-    start < rows.length;
-    start += INSERT_BATCH_SIZE
-  ) {
-    const { error: insertError } = await supabase
+  for (let start = 0; start < rows.length; start += INSERT_BATCH_SIZE) {
+    const { error } = await supabase
       .from("document_pages")
       .insert(rows.slice(start, start + INSERT_BATCH_SIZE));
-
-    if (insertError) {
-      throw insertError;
-    }
+    if (error) throw error;
   }
+}
+
+async function createOcrWorker(fileName: string) {
+  return withTimeout(
+    createWorker("eng", 1, {
+      logger: (message) => {
+        if (
+          message.status === "recognizing text" &&
+          typeof message.progress === "number"
+        ) {
+          console.debug(
+            `OCR ${fileName}: ${Math.round(message.progress * 100)}%`,
+          );
+        }
+      },
+    }),
+    OCR_WORKER_TIMEOUT_MS,
+    "OCR engine took too long to start.",
+  );
 }
 
 export async function extractFileTextForAI(file: File): Promise<{
@@ -130,18 +154,14 @@ export async function extractFileTextForAI(file: File): Promise<{
   ocrPages: number;
 }> {
   if (!isPdf(file)) {
-    return {
-      text: "",
-      totalPages: 0,
-      ocrPages: 0,
-    };
+    return { text: "", totalPages: 0, ocrPages: 0 };
   }
 
   let worker: Worker | null = null;
+  let ocrUnavailable = false;
 
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
-
     const pdf = await pdfjs.getDocument({
       data: bytes,
       useWorkerFetch: false,
@@ -152,42 +172,23 @@ export async function extractFileTextForAI(file: File): Promise<{
     const pageTexts: string[] = [];
     let ocrPages = 0;
 
-    for (
-      let pageNumber = 1;
-      pageNumber <= pdf.numPages;
-      pageNumber += 1
-    ) {
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber);
-
       let text = await extractSelectableText(page);
 
-      if (text.length < MIN_SELECTABLE_TEXT_LENGTH) {
-        if (!worker) {
-          worker = await createWorker("eng", 1);
-        }
-
+      if (text.length < MIN_SELECTABLE_TEXT_LENGTH && !ocrUnavailable) {
         try {
+          if (!worker) worker = await createOcrWorker(file.name);
           const ocrText = await recognizePage(worker, page);
-
-          if (ocrText.length > text.length) {
-            text = ocrText;
-          }
-
-          if (ocrText) {
-            ocrPages += 1;
-          }
+          if (ocrText.length > text.length) text = ocrText;
+          if (ocrText) ocrPages += 1;
         } catch (ocrError) {
-          console.warn(
-            `OCR failed for ${file.name}, page ${pageNumber}:`,
-            ocrError,
-          );
+          console.warn(`OCR skipped for ${file.name}, page ${pageNumber}:`, ocrError);
+          if (!worker) ocrUnavailable = true;
         }
       }
 
-      if (text) {
-        pageTexts.push(`PAGE ${pageNumber}\n${text}`);
-      }
-
+      if (text) pageTexts.push(`PAGE ${pageNumber}\n${text}`);
       page.cleanup();
     }
 
@@ -197,9 +198,7 @@ export async function extractFileTextForAI(file: File): Promise<{
       ocrPages,
     };
   } finally {
-    if (worker) {
-      await worker.terminate();
-    }
+    if (worker) await worker.terminate();
   }
 }
 
@@ -218,10 +217,14 @@ export async function indexUploadedFile({
   }
 
   let worker: Worker | null = null;
+  let ocrUnavailable = false;
+  let indexedPages = 0;
+  let totalPages = 0;
+  let ocrPages = 0;
+  let pendingRows: DocumentPageRow[] = [];
 
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
-
     const pdf = await pdfjs.getDocument({
       data: bytes,
       useWorkerFetch: false,
@@ -229,88 +232,64 @@ export async function indexUploadedFile({
       useSystemFonts: true,
     }).promise;
 
-    const rows: DocumentPageRow[] = [];
-    let ocrPages = 0;
+    totalPages = pdf.numPages;
+    await clearDocumentPages(fileId);
 
-    for (
-      let pageNumber = 1;
-      pageNumber <= pdf.numPages;
-      pageNumber += 1
-    ) {
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber);
-
       let text = await extractSelectableText(page);
 
-      if (text.length < MIN_SELECTABLE_TEXT_LENGTH) {
-        if (!worker) {
-          worker = await createWorker("eng", 1, {
-            logger: (message) => {
-              if (
-                message.status === "recognizing text" &&
-                typeof message.progress === "number"
-              ) {
-                console.debug(
-                  `OCR ${file.name}: ${Math.round(
-                    message.progress * 100,
-                  )}%`,
-                );
-              }
-            },
-          });
-        }
-
+      if (text.length < MIN_SELECTABLE_TEXT_LENGTH && !ocrUnavailable) {
         try {
+          if (!worker) worker = await createOcrWorker(file.name);
           const ocrText = await recognizePage(worker, page);
-
-          if (ocrText.length > text.length) {
-            text = ocrText;
-          }
-
-          if (ocrText) {
-            ocrPages += 1;
-          }
+          if (ocrText.length > text.length) text = ocrText;
+          if (ocrText) ocrPages += 1;
         } catch (ocrError) {
-          console.warn(
-            `OCR failed for ${file.name}, page ${pageNumber}:`,
-            ocrError,
-          );
+          console.warn(`OCR skipped for ${file.name}, page ${pageNumber}:`, ocrError);
+          if (!worker) ocrUnavailable = true;
         }
       }
 
       if (text) {
-        rows.push({
+        pendingRows.push({
           client_id: clientId,
           file_id: fileId,
           page_number: pageNumber,
           content: text,
           updated_at: new Date().toISOString(),
         });
+        indexedPages += 1;
+      }
+
+      if (
+        pendingRows.length >= INSERT_BATCH_SIZE ||
+        pageNumber === pdf.numPages
+      ) {
+        await insertDocumentPages(pendingRows);
+        pendingRows = [];
       }
 
       page.cleanup();
     }
 
-    await saveDocumentPages(fileId, rows);
-
     return {
-      indexedPages: rows.length,
-      totalPages: pdf.numPages,
+      indexedPages,
+      totalPages,
       ocrPages,
       error: null,
     };
   } catch (error) {
     return {
-      indexedPages: 0,
-      totalPages: 0,
-      ocrPages: 0,
+      indexedPages,
+      totalPages,
+      ocrPages,
       error:
         error instanceof Error
           ? error
           : new Error("PDF indexing and OCR failed."),
     };
   } finally {
-    if (worker) {
-      await worker.terminate();
-    }
+    if (worker) await worker.terminate();
   }
 }
