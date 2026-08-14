@@ -111,7 +111,7 @@ export default function CaseAI({
   const [indexMessage, setIndexMessage] = useState("");
   const [error, setError] = useState("");
 
-  const conversationEndRef = useRef<HTMLDivElement>(null);
+  const conversationScrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const loadConversation = async () => {
@@ -134,10 +134,9 @@ export default function CaseAI({
   }, [clientId]);
 
   useEffect(() => {
-    conversationEndRef.current?.scrollIntoView({
-      behavior: "smooth",
-      block: "end",
-    });
+    const container = conversationScrollRef.current;
+    if (!container) return;
+    container.scrollTop = container.scrollHeight;
   }, [messages, loading]);
 
   useEffect(() => {
@@ -405,8 +404,6 @@ export default function CaseAI({
     setLoading(false);
   };
 
-  const examples = mode === "ask" ? askExamples : findExamples;
-
   return (
     <section className="rounded-3xl border border-violet-200 bg-gradient-to-br from-white to-violet-50 p-5 shadow-sm">
       <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-start">
@@ -484,7 +481,7 @@ export default function CaseAI({
       )}
 
       {mode === "ask" && (
-        <div className="mt-4 max-h-[560px] space-y-4 overflow-y-auto rounded-2xl border border-violet-100 bg-white/70 p-4">
+        <div ref={conversationScrollRef} className="mt-4 max-h-[560px] space-y-4 overflow-y-auto rounded-2xl border border-violet-100 bg-white/70 p-4">
           {conversationLoading ? (
             <div className="flex items-center justify-center gap-2 py-10 text-sm font-bold text-violet-600">
               <LoaderCircle className="h-5 w-5 animate-spin" />
@@ -517,8 +514,6 @@ export default function CaseAI({
               Reviewing the current case files...
             </div>
           )}
-
-          <div ref={conversationEndRef} />
         </div>
       )}
 
