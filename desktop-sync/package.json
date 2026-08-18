@@ -23,7 +23,7 @@
   "build": {
     "appId": "com.tjylaw.sync",
     "productName": "TJY Law",
-    "files": ["src/**/*", "package.json"],
+    "files": ["src/**/*", "package.json", ".env"],
     "win": { "target": "nsis" },
     "mac": { "target": "dmg" }
   }
