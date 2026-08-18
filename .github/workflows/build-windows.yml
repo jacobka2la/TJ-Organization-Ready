@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-windows:
+  build-windows-7:
     runs-on: windows-latest
 
     steps:
@@ -14,7 +14,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 18
 
       - name: Create desktop env
         shell: pwsh
@@ -28,13 +28,17 @@ jobs:
         working-directory: desktop-sync
         run: npm install
 
-      - name: Build Windows installer
+      - name: Install Windows 7 compatible Electron
         working-directory: desktop-sync
-        run: npm run build:win
+        run: npm install --no-save --save-exact electron@22.3.27 electron-builder@23.6.0
 
-      - name: Upload Windows installer
+      - name: Build Windows 7 installer
+        working-directory: desktop-sync
+        run: npx electron-builder --win nsis --x64 -c.productName="TJY Law" -c.win.artifactName="TJY-Law-Windows7-Setup-${version}.${ext}"
+
+      - name: Upload Windows 7 installer
         uses: actions/upload-artifact@v4
         with:
-          name: TJY-Law-Windows-Installer
+          name: TJY-Law-Windows7-Installer
           path: desktop-sync/dist/*.exe
           if-no-files-found: error
