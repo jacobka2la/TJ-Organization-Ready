@@ -6,6 +6,9 @@ const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 const { startSync } = require('./sync');
 
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) app.quit();
+
 let mainWindow;
 let tray;
 let syncStarted = false;
@@ -81,7 +84,7 @@ function updateTray() {
   ]));
 }
 function createTray() {
-  let icon = nativeImage.createEmpty();
+  const icon = nativeImage.createEmpty();
   tray = new Tray(icon);
   updateTray();
   tray.on('click', showWindow);
@@ -103,34 +106,43 @@ ipcMain.handle('tj-login', async (_event, credentials) => {
   } catch (error) { console.error('TJY Law login/sync failed:', error); return { ok: false, error: error instanceof Error ? error.message : 'Could not start sync.' }; }
 });
 
-app.whenReady().then(async () => {
-  const documentsDir = app.getPath('documents');
-  const oldRoot = path.join(documentsDir, 'TJ Organization');
-  syncRoot = path.join(documentsDir, 'TJY Law');
+if (gotSingleInstanceLock) {
+  app.on('second-instance', () => showWindow());
 
-  if (fs.existsSync(oldRoot) && !fs.existsSync(syncRoot)) {
-    try { await fsp.rename(oldRoot, syncRoot); }
-    catch (error) { console.error('Could not rename old TJ Organization folder:', error); }
-  }
-  fs.mkdirSync(syncRoot, { recursive: true });
-  authClient = createAuthClient();
+  app.whenReady().then(async () => {
+    const documentsDir = app.getPath('documents');
+    const oldRoot = path.join(documentsDir, 'TJ Organization');
+    syncRoot = path.join(documentsDir, 'TJY Law');
 
-  if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true });
+    // Never move/delete the old sync root automatically. Copy it once as a starting point
+    // and leave the original untouched as a safety backup. A remote pull then reconciles TJY Law.
+    if (fs.existsSync(oldRoot) && !fs.existsSync(syncRoot)) {
+      try {
+        await fsp.cp(oldRoot, syncRoot, { recursive: true, force: false, errorOnExist: false });
+      } catch (error) {
+        console.error('Could not copy old TJ Organization folder into TJY Law:', error);
+      }
+    }
+    fs.mkdirSync(syncRoot, { recursive: true });
+    authClient = createAuthClient();
 
-  mainWindow = new BrowserWindow({ width:760,height:560,resizable:true,show:false,webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,sandbox:false,nodeIntegration:false} });
-  mainWindow.removeMenu();
-  mainWindow.on('close', e => { if (!quitting) { e.preventDefault(); mainWindow.hide(); } });
-  createTray();
+    if (app.isPackaged) app.setLoginItemSettings({ openAtLogin: true, openAsHidden: true });
 
-  const saved = await loadSession();
-  if (saved) {
-    try { await startAuthenticatedSync(saved); mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loginHtml(syncRoot,true))}`); }
-    catch (e) { console.error('Saved session recovery failed:', e); await clearSession(); mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loginHtml(syncRoot,false))}`); mainWindow.show(); }
-  } else {
-    mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loginHtml(syncRoot,false))}`);
-    mainWindow.show();
-  }
-});
+    mainWindow = new BrowserWindow({ width:760,height:560,resizable:true,show:false,webPreferences:{preload:path.join(__dirname,'preload.js'),contextIsolation:true,sandbox:false,nodeIntegration:false} });
+    mainWindow.removeMenu();
+    mainWindow.on('close', e => { if (!quitting) { e.preventDefault(); mainWindow.hide(); } });
+    createTray();
+
+    const saved = await loadSession();
+    if (saved) {
+      try { await startAuthenticatedSync(saved); mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loginHtml(syncRoot,true))}`); }
+      catch (e) { console.error('Saved session recovery failed:', e); await clearSession(); mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loginHtml(syncRoot,false))}`); mainWindow.show(); }
+    } else {
+      mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loginHtml(syncRoot,false))}`);
+      mainWindow.show();
+    }
+  });
+}
 
 app.on('activate', showWindow);
 app.on('window-all-closed', () => {});

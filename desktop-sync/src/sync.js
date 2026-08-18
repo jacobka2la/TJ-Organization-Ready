@@ -197,16 +197,6 @@ async function updateLocalFile(fullPath, manifestPath, manifest, supabase, fileI
   await saveManifest(manifestPath, manifest);
 }
 
-async function deleteLocalFile(relativePath, manifestPath, manifest, supabase) {
-  const found = manifestFileAt(manifest, relativePath);
-  if (!found) return;
-  const [id] = found;
-  const result = await supabase.from('files').update({ deleted_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', id);
-  if (result.error) throw result.error;
-  delete manifest.files[id];
-  await saveManifest(manifestPath, manifest);
-}
-
 async function createLocalFolder(root, dirPath, manifestPath, manifest, supabase) {
   const relativePath = rel(root, dirPath);
   const parts = relativePath.split('/');
@@ -240,9 +230,15 @@ async function startWatcher(root, manifestPath, manifest, suppress, supabase) {
       else await uploadNewLocalFile(root, p, manifestPath, manifest, supabase);
     } catch (e) { console.error('local change sync failed', p, e); }
   });
-  watcher.on('unlink', async (p) => {
-    try { if (!shouldIgnore(p)) await deleteLocalFile(rel(root, p), manifestPath, manifest, supabase); } catch (e) { console.error('local delete sync failed', p, e); }
+
+  // SAFETY RULE: a local disappearance must never delete a legal file from the cloud.
+  // This covers Finder deletes, folder renames/moves, app migrations, disconnected drives,
+  // and another sync process moving the root. The next remote pull will restore the file.
+  watcher.on('unlink', (p) => {
+    if (shouldIgnore(p)) return;
+    console.warn('Local file disappeared; cloud copy preserved and will be restored:', p);
   });
+
   watcher.on('addDir', async (p) => {
     try { if (!shouldIgnore(p)) await createLocalFolder(root, p, manifestPath, manifest, supabase); } catch (e) { console.error('folder create sync failed', p, e); }
   });
