@@ -26,7 +26,7 @@ function createSupabase() {
   const url = process.env.TJ_SUPABASE_URL || process.env.VITE_SUPABASE_URL;
   const key = process.env.TJ_SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
   if (!url || !key) throw new Error('Missing TJ_SUPABASE_URL/TJ_SUPABASE_ANON_KEY in desktop-sync/.env');
-  return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: false } });
+  return createClient(url, key, { auth: { persistSession: false, autoRefreshToken: true } });
 }
 
 async function loadManifest(manifestPath) {
@@ -231,9 +231,6 @@ async function startWatcher(root, manifestPath, manifest, suppress, supabase) {
     } catch (e) { console.error('local change sync failed', p, e); }
   });
 
-  // SAFETY RULE: a local disappearance must never delete a legal file from the cloud.
-  // This covers Finder deletes, folder renames/moves, app migrations, disconnected drives,
-  // and another sync process moving the root. The next remote pull will restore the file.
   watcher.on('unlink', (p) => {
     if (shouldIgnore(p)) return;
     console.warn('Local file disappeared; cloud copy preserved and will be restored:', p);
@@ -245,9 +242,13 @@ async function startWatcher(root, manifestPath, manifest, suppress, supabase) {
   return watcher;
 }
 
-async function startSync(root, userDataDir) {
+async function startSync(root, userDataDir, session) {
   await ensureDir(root);
   const supabase = createSupabase();
+  if (session) {
+    const { error } = await supabase.auth.setSession(session);
+    if (error) throw error;
+  }
   const manifestPath = path.join(userDataDir, 'tj-sync-manifest.json');
   const manifest = await loadManifest(manifestPath);
   const suppress = new Set();
