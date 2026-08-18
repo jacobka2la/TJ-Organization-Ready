@@ -29,8 +29,11 @@ type DocumentPageRow = {
 const MIN_SELECTABLE_TEXT_LENGTH = 35;
 const OCR_RENDER_SCALE = 1.8;
 const INSERT_BATCH_SIZE = 25;
-const OCR_TIMEOUT_MS = 20000;
-const OCR_WORKER_TIMEOUT_MS = 15000;
+const OCR_TIMEOUT_MS = 12000;
+const OCR_WORKER_TIMEOUT_MS = 10000;
+// Automatic Case AI preparation must never spend minutes OCRing one scan-heavy PDF.
+// We still index selectable text from every page, while OCR is limited to a few pages.
+const MAX_OCR_PAGES_PER_FILE = 3;
 
 const isPdf = (file: File) =>
   file.type === "application/pdf" ||
@@ -176,7 +179,11 @@ export async function extractFileTextForAI(file: File): Promise<{
       const page = await pdf.getPage(pageNumber);
       let text = await extractSelectableText(page);
 
-      if (text.length < MIN_SELECTABLE_TEXT_LENGTH && !ocrUnavailable) {
+      if (
+        text.length < MIN_SELECTABLE_TEXT_LENGTH &&
+        !ocrUnavailable &&
+        ocrPages < MAX_OCR_PAGES_PER_FILE
+      ) {
         try {
           if (!worker) worker = await createOcrWorker(file.name);
           const ocrText = await recognizePage(worker, page);
@@ -239,7 +246,11 @@ export async function indexUploadedFile({
       const page = await pdf.getPage(pageNumber);
       let text = await extractSelectableText(page);
 
-      if (text.length < MIN_SELECTABLE_TEXT_LENGTH && !ocrUnavailable) {
+      if (
+        text.length < MIN_SELECTABLE_TEXT_LENGTH &&
+        !ocrUnavailable &&
+        ocrPages < MAX_OCR_PAGES_PER_FILE
+      ) {
         try {
           if (!worker) worker = await createOcrWorker(file.name);
           const ocrText = await recognizePage(worker, page);
