@@ -1,0 +1,42 @@
+name: Build Windows TJY Law Installer
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop-sync/package-lock.json
+
+      - name: Create desktop env
+        shell: pwsh
+        run: |
+          @"
+          TJ_SUPABASE_URL=${{ secrets.TJ_SUPABASE_URL }}
+          TJ_SUPABASE_ANON_KEY=${{ secrets.TJ_SUPABASE_ANON_KEY }}
+          "@ | Set-Content -Path desktop-sync/.env -Encoding utf8
+
+      - name: Install dependencies
+        working-directory: desktop-sync
+        run: npm ci
+
+      - name: Build Windows installer
+        working-directory: desktop-sync
+        run: npm run build:win
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: TJY-Law-Windows-Installer
+          path: desktop-sync/dist/*.exe
+          if-no-files-found: error
