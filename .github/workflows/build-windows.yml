@@ -28,9 +28,9 @@ jobs:
         working-directory: desktop-sync
         run: npm install
 
-      - name: Install Windows 7 compatible Electron
+      - name: Install Windows 7 compatible runtime
         working-directory: desktop-sync
-        run: npm install --no-save --save-exact electron@22.3.27 electron-builder@23.6.0
+        run: npm install --no-save --save-exact electron@22.3.27 electron-builder@23.6.0 @supabase/supabase-js@2.39.8
 
       - name: Build Windows 7 installer
         working-directory: desktop-sync
