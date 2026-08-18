@@ -1,8 +1,8 @@
 {
-  "name": "tj-organization-desktop-sync",
+  "name": "tjy-law",
   "version": "0.1.0",
   "private": true,
-  "description": "Desktop two-way sync client for TJ Organization",
+  "description": "Desktop two-way sync client for TJY Law",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
@@ -21,8 +21,8 @@
     "electron-builder": "^26.0.12"
   },
   "build": {
-    "appId": "com.tjorganization.sync",
-    "productName": "TJ Organization Sync",
+    "appId": "com.tjylaw.sync",
+    "productName": "TJY Law",
     "files": ["src/**/*", "package.json"],
     "win": { "target": "nsis" },
     "mac": { "target": "dmg" }
