@@ -85,10 +85,62 @@ function patchHomeUi(): Plugin {
         patched = patched.replace(moveReloadBug, moveReloadFix);
       }
 
+      // Recognize Word documents by MIME type or extension.
+      const fileTypeLabelBug = `const fileTypeLabel = (file: StoredFile) => {
+  if (file.type?.includes("pdf") || file.name.toLowerCase().endsWith(".pdf")) return "PDF";
+  if (file.type?.startsWith("image/")) return "Image";
+  if (file.type?.startsWith("text/")) return "Text";
+  return file.name.split(".").pop()?.toUpperCase() || "File";
+};`;
+      const fileTypeLabelFix = `const fileTypeLabel = (file: StoredFile) => {
+  const lowerName = file.name.toLowerCase();
+  const lowerType = file.type?.toLowerCase() || "";
+  if (lowerType.includes("pdf") || lowerName.endsWith(".pdf")) return "PDF";
+  if (
+    lowerType.includes("msword") ||
+    lowerType.includes("wordprocessingml") ||
+    lowerName.endsWith(".doc") ||
+    lowerName.endsWith(".docx")
+  ) return "Word";
+  if (lowerType.startsWith("image/")) return "Image";
+  if (lowerType.startsWith("text/")) return "Text";
+  return file.name.split(".").pop()?.toUpperCase() || "File";
+};`;
+
+      if (patched.includes(fileTypeLabelBug)) {
+        patched = patched.replace(fileTypeLabelBug, fileTypeLabelFix);
+      }
+
       // Replace FileList with a grid/list toggle. List mode intentionally shows
       // the complete filename (wrapping as needed) instead of truncating it.
       const fileListPattern = /function FileList\([\s\S]*?\n}\n\nfunction FileThumb/;
-      const fileListReplacement = `function FileList({
+      const fileListReplacement = `function FileTypeBadge({ file }: { file: StoredFile }) {
+  const type = fileTypeLabel(file);
+
+  if (type === "PDF") {
+    return (
+      <span className="inline-flex h-7 min-w-10 shrink-0 items-center justify-center rounded-lg bg-red-600 px-2 text-[10px] font-black tracking-wide text-white shadow-sm">
+        PDF
+      </span>
+    );
+  }
+
+  if (type === "Word") {
+    return (
+      <span className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-blue-700 text-sm font-black text-white shadow-sm" title="Microsoft Word document">
+        W
+      </span>
+    );
+  }
+
+  return (
+    <span className="inline-flex h-7 min-w-9 shrink-0 items-center justify-center rounded-lg bg-slate-200 px-2 text-[10px] font-black text-slate-600">
+      {type}
+    </span>
+  );
+}
+
+function FileList({
   files,
   emptyText,
   onDelete,
@@ -189,6 +241,8 @@ function patchHomeUi(): Plugin {
                 )}
               </button>
 
+              <FileTypeBadge file={file} />
+
               <div className="min-w-0 flex-1">
                 <p className="whitespace-normal break-words text-sm font-black leading-5 text-slate-950">
                   {file.name}
@@ -266,9 +320,7 @@ function patchHomeUi(): Plugin {
                       {fileTypeLabel(file)} • {fileSizeLabel(file.size)}
                     </p>
                   </div>
-                  <span className="shrink-0 rounded-lg bg-blue-50 px-2 py-1 text-[10px] font-black text-blue-700">
-                    {fileTypeLabel(file)}
-                  </span>
+                  <FileTypeBadge file={file} />
                 </div>
 
                 <div className="flex items-center justify-between border-t border-slate-100 pt-2">
