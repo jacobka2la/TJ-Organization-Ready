@@ -49,19 +49,13 @@ async function startAuthenticatedSync(session) {
   if (error || !data.session) throw error || new Error('Saved login expired.');
   await saveSession(data.session);
 
-  const nativeFetch = global.fetch.bind(global);
-  global.fetch = async (input, init = {}) => {
-    const { data: current } = await authClient.auth.getSession();
-    const token = current.session?.access_token;
-    const headers = new Headers(init.headers || {});
-    if (token) headers.set('Authorization', `Bearer ${token}`);
-    return nativeFetch(input, { ...init, headers });
-  };
-
   authClient.auth.onAuthStateChange(async (_event, nextSession) => {
     if (nextSession) await saveSession(nextSession).catch(console.error);
   });
-  await startSync(syncRoot, app.getPath('userData'));
+
+  // Pass the authenticated Supabase session directly to the sync client.
+  // This avoids relying on global.fetch, which does not exist in Electron 22 / Node 16.
+  await startSync(syncRoot, app.getPath('userData'), data.session);
   syncStarted = true;
   updateTray();
 }
@@ -114,8 +108,6 @@ if (gotSingleInstanceLock) {
     const oldRoot = path.join(documentsDir, 'TJ Organization');
     syncRoot = path.join(documentsDir, 'TJY Law');
 
-    // Never move/delete the old sync root automatically. Copy it once as a starting point
-    // and leave the original untouched as a safety backup. A remote pull then reconciles TJY Law.
     if (fs.existsSync(oldRoot) && !fs.existsSync(syncRoot)) {
       try {
         await fsp.cp(oldRoot, syncRoot, { recursive: true, force: false, errorOnExist: false });
