@@ -128,4 +128,22 @@
   .gradient-primary {
     background: var(--hero-gradient);
   }
+
+  /* TJ Organization uses hardcoded Tailwind slate/white surfaces throughout Home.tsx.
+     Override those utilities globally so the light theme stays light without Dell-level glare. */
+  .bg-white {
+    background-color: rgb(238 240 243) !important;
+  }
+
+  .bg-white\/90 {
+    background-color: rgb(238 240 243 / 0.94) !important;
+  }
+
+  .bg-slate-50 {
+    background-color: rgb(229 232 237) !important;
+  }
+
+  .bg-slate-100 {
+    background-color: rgb(218 222 228) !important;
+  }
 }
