@@ -34,7 +34,7 @@ jobs:
 
       - name: Build Windows 7 installer
         working-directory: desktop-sync
-        run: npx electron-builder --win nsis --x64 -c.productName="TJY Law" -c.win.artifactName="TJY-Law-Windows7-Setup.exe"
+        run: npx electron-builder --win nsis --x64 --config.productName="TJY Law" --config.win.artifactName="TJY-Law-Windows7-Setup.exe"
 
       - name: Upload Windows 7 installer
         uses: actions/upload-artifact@v4
