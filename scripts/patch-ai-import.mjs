@@ -12,22 +12,12 @@ if (!source.includes('import { docxToClassifierPdfBase64 } from "@/lib/docxToPdf
 
 source = source.replace(
   /type SelectedPdf = \{[\s\S]*?\n\};/,
-  `type SelectedDocument = {
-  file: File;
-  originalFilename: string;
-  classifierPdfBase64: string | null;
-  kind: "pdf" | "docx" | "doc";
-};`,
+  `type SelectedDocument = {\n  file: File;\n  originalFilename: string;\n  kind: "pdf" | "docx" | "doc";\n};`,
 );
 
 source = source.replace(
   /const ensurePdfExtension = \(name: string\) => \{[\s\S]*?\n\};/,
-  `const ensureOriginalExtension = (name: string, originalFilename: string) => {
-  const match = originalFilename.match(/\\.(pdf|docx|doc)$/i);
-  const extension = match?.[1]?.toLowerCase() || "pdf";
-  const clean = name.trim().replace(/\\.(pdf|docx|doc)$/i, "");
-  return \`\${clean || "Untitled Document"}.\${extension}\`;
-};`,
+  `const ensureOriginalExtension = (name: string, originalFilename: string) => {\n  const match = originalFilename.match(/\\.(pdf|docx|doc)$/i);\n  const extension = match?.[1]?.toLowerCase() || "pdf";\n  const clean = name.trim().replace(/\\.(pdf|docx|doc)$/i, "");\n  return \`\${clean || "Untitled Document"}.\${extension}\`;\n};`,
 );
 
 source = source.replace(
@@ -36,278 +26,18 @@ source = source.replace(
 );
 
 const handleStart = source.indexOf(" const handleFolderSelection = async (");
-const analyzeStart = source.indexOf("const analyzeFolder = async (", handleStart);
-const updateClientStart = source.indexOf("  const updateClient = (", analyzeStart);
+const updateClientStart = source.indexOf("  const updateClient = (", handleStart);
+if (handleStart === -1 || updateClientStart === -1) throw new Error("Could not locate AI import functions to patch.");
 
-if (handleStart === -1 || analyzeStart === -1 || updateClientStart === -1) {
-  throw new Error("Could not locate AI import functions to patch.");
-}
-
-const replacement = ` const handleFolderSelection = async (
-  event: React.ChangeEvent<HTMLInputElement>,
-) => {
-  const files = Array.from(event.target.files || []);
-
-  const supportedFiles = files.filter((file) => {
-    const lowerName = file.name.toLowerCase();
-    const lowerType = file.type.toLowerCase();
-    return (
-      lowerType === "application/pdf" ||
-      lowerName.endsWith(".pdf") ||
-      lowerType.includes("wordprocessingml") ||
-      lowerType.includes("msword") ||
-      lowerName.endsWith(".docx") ||
-      lowerName.endsWith(".doc")
-    );
-  });
-
-  if (supportedFiles.length === 0) {
-    setError("That folder does not contain any PDFs or Word documents.");
-    return;
-  }
-
-  const relativePath =
-    (supportedFiles[0] as File & { webkitRelativePath?: string })
-      .webkitRelativePath || "";
-
-  const detectedFolderName =
-    relativePath.split("/")[0] || "Imported Client";
-
-  setError("");
-  setFolderName(detectedFolderName);
-  setStep("reading");
-
-  setProgress({
-    current: 0,
-    total: supportedFiles.length,
-    label: "Reading documents",
-  });
-
-  const preparedDocuments: SelectedDocument[] = [];
-
-  for (let index = 0; index < supportedFiles.length; index += 1) {
-    const file = supportedFiles[index];
-    const lowerName = file.name.toLowerCase();
-    const kind: SelectedDocument["kind"] = lowerName.endsWith(".docx")
-      ? "docx"
-      : lowerName.endsWith(".doc")
-        ? "doc"
-        : "pdf";
-
-    setProgress({
-      current: index + 1,
-      total: supportedFiles.length,
-      label: \`Reading \${file.name}\`,
-    });
-
-    try {
-      let classifierPdfBase64: string | null = null;
-
-      if (kind === "pdf") {
-        classifierPdfBase64 = await fileToBase64(file);
-      } else if (kind === "docx") {
-        classifierPdfBase64 = await docxToClassifierPdfBase64(file);
-      }
-
-      preparedDocuments.push({
-        file,
-        originalFilename: file.name,
-        classifierPdfBase64,
-        kind,
-      });
-    } catch (fileError) {
-      console.error("Could not read document:", file.name, fileError);
-
-      preparedDocuments.push({
-        file,
-        originalFilename: file.name,
-        classifierPdfBase64: null,
-        kind,
-      });
-    }
-  }
-
-  setSelectedPdfs(preparedDocuments);
-  await analyzeFolder(detectedFolderName, preparedDocuments);
-};
-
-const analyzeFolder = async (
-  name: string,
-  documents: SelectedDocument[],
-) => {
-  setStep("analyzing");
-  setError("");
-
-  const documentResults: ImportDocumentPlan[] = [];
-
-  for (let index = 0; index < documents.length; index += 1) {
-    const document = documents[index];
-
-    setProgress({
-      current: index + 1,
-      total: documents.length,
-      label: \`Analyzing \${document.originalFilename}\`,
-    });
-
-    if (!document.classifierPdfBase64) {
-      const isOldDoc = document.kind === "doc";
-      documentResults.push({
-        originalFilename: document.originalFilename,
-        documentType: isOldDoc ? "Legacy Word Document" : "Unreadable Document",
-        suggestedFolder: "Needs Review",
-        suggestedFilename: document.originalFilename.replace(/\\.(pdf|docx|doc)$/i, ""),
-        confidence: 0,
-        needsReview: true,
-        reason: isOldDoc
-          ? "Legacy .doc Word files are imported but require manual review because this older binary format cannot be reliably read in the browser."
-          : "The document could not be read for AI classification, so it was kept for manual review instead of being skipped.",
-        clientNamesFound: [],
-        providerOrOrganization: null,
-        importantDateStart: null,
-        importantDateEnd: null,
-        includeDateInFilename: false,
-        possibleWrongClient: false,
-        possiblyUnrelated: false,
-      });
-      continue;
-    }
-
-    const { data, error: invokeError } = await supabase.functions.invoke(
-      "ai-classify-document",
-      {
-        body: {
-          originalFilename: document.originalFilename,
-          pdfBase64: document.classifierPdfBase64,
-        },
-      },
-    );
-
-    if (invokeError || !data?.success || !data?.classification) {
-      console.error(
-        "Document classification failed:",
-        document.originalFilename,
-        invokeError,
-        data,
-      );
-
-      documentResults.push({
-        originalFilename: document.originalFilename,
-        documentType: "Classification Failed",
-        suggestedFolder: "Needs Review",
-        suggestedFilename: document.originalFilename.replace(/\\.(pdf|docx|doc)$/i, ""),
-        confidence: 0,
-        needsReview: true,
-        reason:
-          data?.error ||
-          invokeError?.message ||
-          "The document could not be classified.",
-        clientNamesFound: [],
-        providerOrOrganization: null,
-        importantDateStart: null,
-        importantDateEnd: null,
-        includeDateInFilename: false,
-        possibleWrongClient: false,
-        possiblyUnrelated: false,
-      });
-      continue;
-    }
-
-    documentResults.push({
-      originalFilename: document.originalFilename,
-      ...data.classification,
-    });
-  }
-
-  const fallbackName = splitFullName(name.replace(/[_-]+/g, " "));
-
-  const foundClientNames = documentResults
-    .flatMap((document) => document.clientNamesFound || [])
-    .filter(Boolean);
-
-  const mostCommonClientName =
-    foundClientNames.length > 0
-      ? foundClientNames
-          .sort(
-            (a, b) =>
-              foundClientNames.filter((name) => name === b).length -
-              foundClientNames.filter((name) => name === a).length,
-          )[0]
-      : null;
-
-  const detectedName = mostCommonClientName
-    ? splitFullName(mostCommonClientName)
-    : fallbackName;
-
-  const foldersToCreate = ALLOWED_FOLDERS.filter((folder) =>
-    documentResults.some((document) => document.suggestedFolder === folder),
-  );
-
-  const nextPlan: ImportPlan = {
-    client: {
-      fullName: mostCommonClientName || name,
-      firstName: detectedName.firstName,
-      lastName: detectedName.lastName,
-      dateOfBirth: null,
-      phone: null,
-      email: null,
-      address: null,
-      caseType: "Personal Injury",
-      confidence: mostCommonClientName ? 0.8 : 0.5,
-      needsReview: !mostCommonClientName,
-      reason: mostCommonClientName
-        ? "The client name was found across the classified documents."
-        : "The client name was taken from the selected folder name.",
-    },
-    foldersToCreate,
-    documents: documentResults,
-    summary: {
-      totalDocuments: documentResults.length,
-      readyToImport: documentResults.filter((document) => !document.needsReview).length,
-      needsReview: documentResults.filter((document) => document.needsReview).length,
-      possibleWrongClientFiles: documentResults
-        .filter((document) => document.possibleWrongClient)
-        .map((document) => document.originalFilename),
-      possibleUnrelatedFiles: documentResults
-        .filter((document) => document.possiblyUnrelated)
-        .map((document) => document.originalFilename),
-    },
-  };
-
-  setPlan(nextPlan);
-  setStep("review");
-};
-
-`;
+const replacement = ` const classifyFromFilename = (originalFilename: string): ImportDocumentPlan | null => {\n  const base = originalFilename.replace(/\\.(pdf|docx|doc)$/i, "").trim();\n  const normalized = base.toLowerCase().replace(/[_-]+/g, " ").replace(/\\s+/g, " ");\n\n  // Scanner/camera/default names are deliberately treated as unknown so the file is opened.\n  if (/^(image|img|scan|scanned|document|doc|file|page|photo|picture|untitled|copy)(\\s|\\(|_|-|#|\\d|$)/i.test(base) || /^\\d+$/.test(base)) return null;\n\n  const rules: Array<{ pattern: RegExp; folder: string; type: string }> = [\n    { pattern: /initial disclosure|disclosures?/, folder: "Pleadings", type: "Initial Disclosures" },\n    { pattern: /complaint|summons|answer|motion|brief|pleading|notice of hearing|proof of service/, folder: "Pleadings", type: "Pleading" },\n    { pattern: /interrogator|request for production|discovery|requests? to produce|deposition/, folder: "Discovery", type: "Discovery" },\n    { pattern: /authori[sz]ation|hipaa/, folder: "Authorizations", type: "Authorization" },\n    { pattern: /police report|traffic crash|crash report|accident report/, folder: "Police Report", type: "Police Report" },\n    { pattern: /medical bill|billing statement|itemized bill|ledger|balance/, folder: "Medical Bills", type: "Medical Bill" },\n    { pattern: /medical record|progress note|office note|treatment record|operative report|radiology|mri|x ray|x-ray/, folder: "Medical Records", type: "Medical Record" },\n    { pattern: /lien|subrogation/, folder: "Liens", type: "Lien / Subrogation" },\n    { pattern: /ime|independent medical exam/, folder: "IME", type: "IME" },\n    { pattern: /state farm|progressive|citizens|farm bureau|allstate|geico|insurance|adjuster|claim letter|correspondence/, folder: "Correspondence", type: "Correspondence" },\n  ];\n\n  const match = rules.find((rule) => rule.pattern.test(normalized));\n  if (!match || !ALLOWED_FOLDERS.includes(match.folder)) return null;\n\n  return {\n    originalFilename, documentType: match.type, suggestedFolder: match.folder, suggestedFilename: base,\n    confidence: 0.96, needsReview: false, reason: "Classified from a clear descriptive filename; file contents were not opened.",\n    clientNamesFound: [], providerOrOrganization: null, importantDateStart: null, importantDateEnd: null,\n    includeDateInFilename: false, possibleWrongClient: false, possiblyUnrelated: false,\n  };\n};\n\n const handleFolderSelection = async (event: React.ChangeEvent<HTMLInputElement>) => {\n  const files = Array.from(event.target.files || []);\n  const supportedFiles = files.filter((file) => {\n    const n = file.name.toLowerCase(); const t = file.type.toLowerCase();\n    return t === "application/pdf" || n.endsWith(".pdf") || t.includes("wordprocessingml") || t.includes("msword") || n.endsWith(".docx") || n.endsWith(".doc");\n  });\n  if (!supportedFiles.length) { setError("That folder does not contain any PDFs or Word documents."); return; }\n  const relativePath = (supportedFiles[0] as File & { webkitRelativePath?: string }).webkitRelativePath || "";\n  const detectedFolderName = relativePath.split("/")[0] || "Imported Client";\n  setError(""); setFolderName(detectedFolderName); setStep("reading");\n  setProgress({ current: 0, total: supportedFiles.length, label: "Reading filenames" });\n  const preparedDocuments: SelectedDocument[] = supportedFiles.map((file) => ({\n    file, originalFilename: file.name, kind: file.name.toLowerCase().endsWith(".docx") ? "docx" : file.name.toLowerCase().endsWith(".doc") ? "doc" : "pdf",\n  }));\n  setSelectedPdfs(preparedDocuments);\n  await analyzeFolder(detectedFolderName, preparedDocuments);\n};\n\nconst analyzeFolder = async (name: string, documents: SelectedDocument[]) => {\n  setStep("analyzing"); setError("");\n  const documentResults: ImportDocumentPlan[] = [];\n  for (let index = 0; index < documents.length; index += 1) {\n    const document = documents[index];\n    setProgress({ current: index + 1, total: documents.length, label: \`Analyzing \${document.originalFilename}\` });\n\n    const filenameResult = classifyFromFilename(document.originalFilename);\n    if (filenameResult) { documentResults.push(filenameResult); continue; }\n\n    // Only expensive/read-heavy work happens when the filename was not descriptive enough.\n    let classifierPdfBase64: string | null = null;\n    try {\n      if (document.kind === "pdf") classifierPdfBase64 = await fileToBase64(document.file);\n      else if (document.kind === "docx") classifierPdfBase64 = await docxToClassifierPdfBase64(document.file);\n    } catch (fileError) { console.error("Could not read document:", document.originalFilename, fileError); }\n\n    if (!classifierPdfBase64) {\n      documentResults.push({\n        originalFilename: document.originalFilename, documentType: document.kind === "doc" ? "Legacy Word Document" : "Unreadable Document",\n        suggestedFolder: "Needs Review", suggestedFilename: document.originalFilename.replace(/\\.(pdf|docx|doc)$/i, ""), confidence: 0, needsReview: true,\n        reason: document.kind === "doc" ? "Legacy .doc files are accepted and imported. This older binary Word format could not be reliably decoded in the browser, so this unclear-title file needs review." : "The unclear-title document could not be read for AI classification.",\n        clientNamesFound: [], providerOrOrganization: null, importantDateStart: null, importantDateEnd: null, includeDateInFilename: false, possibleWrongClient: false, possiblyUnrelated: false,\n      });\n      continue;\n    }\n\n    const { data, error: invokeError } = await supabase.functions.invoke("ai-classify-document", { body: { originalFilename: document.originalFilename, pdfBase64: classifierPdfBase64 } });\n    if (invokeError || !data?.success || !data?.classification) {\n      documentResults.push({ originalFilename: document.originalFilename, documentType: "Classification Failed", suggestedFolder: "Needs Review", suggestedFilename: document.originalFilename.replace(/\\.(pdf|docx|doc)$/i, ""), confidence: 0, needsReview: true, reason: data?.error || invokeError?.message || "The document could not be classified.", clientNamesFound: [], providerOrOrganization: null, importantDateStart: null, importantDateEnd: null, includeDateInFilename: false, possibleWrongClient: false, possiblyUnrelated: false });\n      continue;\n    }\n    documentResults.push({ originalFilename: document.originalFilename, ...data.classification });\n  }\n\n  const fallbackName = splitFullName(name.replace(/[_-]+/g, " "));\n  const foundClientNames = documentResults.flatMap((document) => document.clientNamesFound || []).filter(Boolean);\n  const mostCommonClientName = foundClientNames.length ? foundClientNames.sort((a,b) => foundClientNames.filter(n => n === b).length - foundClientNames.filter(n => n === a).length)[0] : null;\n  const detectedName = mostCommonClientName ? splitFullName(mostCommonClientName) : fallbackName;\n  const foldersToCreate = ALLOWED_FOLDERS.filter((folder) => documentResults.some((document) => document.suggestedFolder === folder));\n  const nextPlan: ImportPlan = {\n    client: { fullName: mostCommonClientName || name, firstName: detectedName.firstName, lastName: detectedName.lastName, dateOfBirth: null, phone: null, email: null, address: null, caseType: "Personal Injury", confidence: mostCommonClientName ? 0.8 : 0.5, needsReview: !mostCommonClientName, reason: mostCommonClientName ? "The client name was found across documents that required content analysis." : "The client name was taken from the selected folder name." },\n    foldersToCreate, documents: documentResults,\n    summary: { totalDocuments: documentResults.length, readyToImport: documentResults.filter(d => !d.needsReview).length, needsReview: documentResults.filter(d => d.needsReview).length, possibleWrongClientFiles: documentResults.filter(d => d.possibleWrongClient).map(d => d.originalFilename), possibleUnrelatedFiles: documentResults.filter(d => d.possiblyUnrelated).map(d => d.originalFilename) },\n  };\n  setPlan(nextPlan); setStep("review");\n};\n\n`;
 
 source = source.slice(0, handleStart) + replacement + source.slice(updateClientStart);
-
-source = source.replace(
-  'ensurePdfExtension(document.suggestedFilename)',
-  'ensureOriginalExtension(document.suggestedFilename, selected.originalFilename)',
-);
-
-source = source.replace(
-  'type: selected.file.type || "application/pdf",',
-  'type: selected.file.type || (selected.originalFilename.toLowerCase().endsWith(".docx") ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document" : selected.originalFilename.toLowerCase().endsWith(".doc") ? "application/msword" : "application/pdf"),',
-);
-
-source = source.replace(
-  'contain PDFs. TJY AI will detect the client,',
-  'contain PDFs or Word documents. TJY AI will detect the client,',
-);
-source = source.replace(
-  'accept="application/pdf,.pdf"',
-  'accept="application/pdf,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,application/msword,.doc"',
-);
-source = source.replace(
-  '`${progress.current} of ${progress.total} PDFs read`',
-  '`${progress.current} of ${progress.total} documents read`',
-);
+source = source.replace('ensurePdfExtension(document.suggestedFilename)', 'ensureOriginalExtension(document.suggestedFilename, selected.originalFilename)');
+source = source.replace('type: selected.file.type || "application/pdf",', 'type: selected.file.type || (selected.originalFilename.toLowerCase().endsWith(".docx") ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document" : selected.originalFilename.toLowerCase().endsWith(".doc") ? "application/msword" : "application/pdf"),');
+source = source.replace('contain PDFs. TJY AI will detect the client,', 'contain PDFs or Word documents. TJY AI checks clear filenames first and only reads document contents when needed,');
+source = source.replace('accept="application/pdf,.pdf"', 'accept="application/pdf,.pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,.docx,application/msword,.doc"');
+source = source.replace('`${progress.current} of ${progress.total} PDFs read`', '`${progress.current} of ${progress.total} documents checked`');
 source = source.replace('label="PDFs"', 'label="Documents"');
-source = source.replace(
-  'The folders were created and every PDF was\n                uploaded under its approved name.',
-  'The folders were created and every supported document was\n                uploaded under its approved name.',
-);
-
+source = source.replace('The folders were created and every PDF was\n                uploaded under its approved name.', 'The folders were created and every supported document was\n                uploaded under its approved name.');
 fs.writeFileSync(filePath, source);
-console.log("AI Client Import patched for PDF, DOCX, and legacy DOC handling.");
+console.log("AI Client Import patched for filename-first PDF/DOCX/DOC handling with content fallback.");
