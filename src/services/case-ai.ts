@@ -173,6 +173,95 @@ export async function findInCaseFiles(input: {
   return searchCaseDocuments(input.clientId, input.query, 30);
 }
 
+const normalizeQuery = (value: string) =>
+  value.replace(/\s+/g, " ").trim().slice(0, 1400);
+
+const isLikelyFollowUp = (question: string) => {
+  const words = question.trim().split(/\s+/).filter(Boolean);
+  return (
+    words.length <= 9 ||
+    /\b(it|that|they|them|this|those|he|she|his|her|there|then|same|one|ones)\b/i.test(
+      question,
+    )
+  );
+};
+
+const buildRetrievalQueries = (
+  question: string,
+  conversation: ConversationMessage[],
+) => {
+  const queries: string[] = [];
+  const add = (value: string) => {
+    const normalized = normalizeQuery(value);
+    if (normalized && !queries.includes(normalized)) queries.push(normalized);
+  };
+
+  add(question);
+
+  const recent = conversation.slice(-8);
+  const previousUsers = recent
+    .filter((message) => message.role === "user")
+    .map((message) => message.content.trim())
+    .filter(Boolean);
+  const previousAssistants = recent
+    .filter((message) => message.role === "assistant")
+    .map((message) => message.content.trim())
+    .filter(Boolean);
+
+  const previousUser = previousUsers.at(-1);
+  const previousAssistant = previousAssistants.at(-1);
+
+  if (previousUser) add(`${previousUser}\nFollow-up: ${question}`);
+
+  if (isLikelyFollowUp(question) && previousAssistant) {
+    add(`${question}\nRecent answer context: ${previousAssistant.slice(0, 700)}`);
+  }
+
+  if (previousUsers.length > 1) {
+    add(`${previousUsers.slice(-2).join(" ")} ${question}`);
+  }
+
+  return queries.slice(0, 4);
+};
+
+const mergeSearchResults = (
+  current: CaseSearchResult[],
+  incoming: CaseSearchResult[],
+) => {
+  const byPage = new Map<string, CaseSearchResult>();
+
+  [...current, ...incoming].forEach((source) => {
+    const key = `${source.file_id}:${source.page_number}`;
+    const existing = byPage.get(key);
+    if (!existing || source.rank > existing.rank) byPage.set(key, source);
+  });
+
+  return Array.from(byPage.values())
+    .sort((a, b) => b.rank - a.rank)
+    .slice(0, 24);
+};
+
+async function retrieveCaseSources(input: {
+  clientId: string;
+  question: string;
+  conversation: ConversationMessage[];
+}) {
+  const queries = buildRetrievalQueries(input.question, input.conversation);
+  let sources: CaseSearchResult[] = [];
+
+  for (const query of queries) {
+    const result = await searchCaseDocuments(input.clientId, query, 20);
+    if (result.error) return { data: null, error: result.error };
+
+    sources = mergeSearchResults(sources, result.data || []);
+
+    // A solid set of pages is enough; avoid unnecessary extra database calls.
+    if (sources.length >= 10) break;
+  }
+
+  return { data: sources, error: null as Error | null };
+}
+
 export async function askCaseAI(input: {
   clientId: string;
   clientName: string;
@@ -182,11 +271,11 @@ export async function askCaseAI(input: {
   data: CaseAIAnswer | null;
   error: Error | null;
 }> {
-  const searchResponse = await searchCaseDocuments(
-    input.clientId,
-    input.question,
-    20,
-  );
+  const searchResponse = await retrieveCaseSources({
+    clientId: input.clientId,
+    question: input.question,
+    conversation: input.conversation,
+  });
 
   if (searchResponse.error) {
     return {
@@ -197,17 +286,11 @@ export async function askCaseAI(input: {
 
   const sources = searchResponse.data || [];
 
-  /*
-   * Follow-up questions such as "did they pay it?" may not contain
-   * enough useful search words. When that happens, the Edge Function
-   * still receives the conversation, but it must not treat prior AI
-   * answers as proof.
-   */
   if (sources.length === 0) {
     return {
       data: {
         answer:
-          "I couldn’t find current case-file support for that answer. Try including the provider, document, injury, or insurance company you’re referring to.",
+          "I checked this client’s indexed case file and couldn’t find enough document support to answer that reliably. If this is a follow-up, try naming the document, provider, insurer, person, or issue once and I’ll keep that context for the conversation.",
         sources: [],
       },
       error: null,
