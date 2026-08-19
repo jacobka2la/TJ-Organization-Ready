@@ -4,9 +4,9 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "node scripts/patch-ai-import.mjs && node scripts/patch-no-ai-rename.mjs && node scripts/patch-case-ai-indexing.mjs && node scripts/patch-full-case-indexing.mjs && node scripts/patch-docx-preview.mjs && vite",
-    "build": "node scripts/patch-ai-import.mjs && node scripts/patch-no-ai-rename.mjs && node scripts/patch-case-ai-indexing.mjs && node scripts/patch-full-case-indexing.mjs && node scripts/patch-docx-preview.mjs && vite build",
-    "build:dev": "node scripts/patch-ai-import.mjs && node scripts/patch-no-ai-rename.mjs && node scripts/patch-case-ai-indexing.mjs && node scripts/patch-full-case-indexing.mjs && node scripts/patch-docx-preview.mjs && vite build --mode development",
+    "dev": "node scripts/patch-ai-import.mjs && node scripts/patch-no-ai-rename.mjs && node scripts/patch-case-ai-indexing.mjs && node scripts/patch-full-case-indexing.mjs && node scripts/patch-docx-preview.mjs && node scripts/patch-case-ai-all-files.mjs && vite",
+    "build": "node scripts/patch-ai-import.mjs && node scripts/patch-no-ai-rename.mjs && node scripts/patch-case-ai-indexing.mjs && node scripts/patch-full-case-indexing.mjs && node scripts/patch-docx-preview.mjs && node scripts/patch-case-ai-all-files.mjs && vite build",
+    "build:dev": "node scripts/patch-ai-import.mjs && node scripts/patch-no-ai-rename.mjs && node scripts/patch-case-ai-indexing.mjs && node scripts/patch-full-case-indexing.mjs && node scripts/patch-docx-preview.mjs && node scripts/patch-case-ai-all-files.mjs && vite build --mode development",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
