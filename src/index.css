@@ -129,6 +129,11 @@
     background: var(--hero-gradient);
   }
 
+  /* Folder-card delete buttons are intentionally dark so they stay visible. */
+  button.rounded-xl.p-2.text-slate-300 {
+    color: rgb(15 23 42) !important;
+  }
+
   /* Softer light theme for bright office displays. */
   .bg-white {
     background-color: rgb(224 227 232) !important;
