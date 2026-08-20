@@ -3,26 +3,46 @@ import fs from "node:fs";
 const filePath = "src/pages/Home.tsx";
 let source = fs.readFileSync(filePath, "utf8");
 
-// IMPORTANT: the user confirmed the LOWER search bar is the working one.
-// Keep the self-contained FolderSearchableFileList (lower bar) and remove only
-// the old Home-level folderFileSearch UI/state (upper broken bar).
+// Folder search is generated at build time. Start clean every build so old
+// generated implementations can never stack into duplicate search bars.
+source = source.replace(/\nfunction FolderSearchableFileList\(\{[\s\S]*?\n\}\n\n(?=function FileList\()/g, "\n");
+
+// Remove any old Home-level folder-search state/derived values.
 source = source.replace(/\n\s*const \[folderFileSearch, setFolderFileSearch\] = useState\(""\);/g, "");
 source = source.replace(/\n\s*const filteredSelectedFolderFiles = useMemo\(\(\) => \{[\s\S]*?\}, \[folderFileSearch, selectedFolder\]\);/g, "");
 source = source.replace(/\n\s*setFolderFileSearch\(""\);/g, "");
 source = source.replace(/files=\{filteredSelectedFolderFiles\}/g, "files={selectedFolder.files}");
-
-// Remove the OLD/TOP search block specifically by folderFileSearch state.
-// Do not touch the lower working bar, which uses query/setQuery.
-source = source.replace(/\n\s*<div className="[^\"]*">\s*<Search[^>]*\/>\s*<input\s+value=\{folderFileSearch\}[\s\S]*?<\/div>/g, "");
-source = source.replace(/\n\s*<div className="[^\"]*">[\s\S]*?<input[\s\S]*?value=\{folderFileSearch\}[\s\S]*?<\/div>/g, "");
 source = source.replace(/\n\s*\{folderFileSearch\.trim\(\) && \([\s\S]*?\)\}/g, "");
+
+// Remove every standalone folder-search block that may have been baked in by
+// an older deployment/patch. We only target the exact folder-search placeholder.
+source = source.replace(/\n\s*<div className="[^"]*">[\s\S]*?<input[\s\S]*?placeholder="Search files in this folder\.\.\."[\s\S]*?<\/div>/g, "");
+
+// If a previous build replaced the selected-folder FileList with our wrapper,
+// put it back to the plain canonical FileList before rebuilding the wrapper.
+source = source.replace(
+  /<FolderSearchableFileList\s+key=\{selectedFolder\.id\}[\s\S]*?\/>/g,
+  `<FileList
+                  files={selectedFolder.files}
+                  emptyText="No files uploaded in this folder yet."
+                  onDelete={deleteFolderFile}
+                  onRename={renameFile}
+                  onPreview={handlePreviewFile}
+                  selectedFileIds={selectedFileIds}
+                  onToggleSelected={(fileId) =>
+                    setSelectedFileIds((current) =>
+                      current.includes(fileId)
+                        ? current.filter((id) => id !== fileId)
+                        : [...current, fileId],
+                    )
+                  }
+                />`,
+);
 
 const marker = "function FileList({";
 if (!source.includes(marker)) throw new Error("Could not locate FileList in Home.tsx");
 
-// Add the known-good LOWER search component only if it is not already baked in.
-if (!source.includes("function FolderSearchableFileList({")) {
-  const component = `function FolderSearchableFileList({
+const component = `function FolderSearchableFileList({
   files,
   onDelete,
   onRename,
@@ -79,12 +99,9 @@ if (!source.includes("function FolderSearchableFileList({")) {
 }
 
 `;
-  source = source.replace(marker, component + marker);
-}
+source = source.replace(marker, component + marker);
 
-// Replace the plain folder file list with the lower working search component if needed.
-if (!source.includes("<FolderSearchableFileList")) {
-  const oldBlock = `<FileList
+const oldBlock = `<FileList
                   files={selectedFolder.files}
                   emptyText="No files uploaded in this folder yet."
                   onDelete={deleteFolderFile}
@@ -99,7 +116,8 @@ if (!source.includes("<FolderSearchableFileList")) {
                     )
                   }
                 />`;
-  const newBlock = `<FolderSearchableFileList
+
+const newBlock = `<FolderSearchableFileList
                   key={selectedFolder.id}
                   files={selectedFolder.files}
                   onDelete={deleteFolderFile}
@@ -114,16 +132,18 @@ if (!source.includes("<FolderSearchableFileList")) {
                     )
                   }
                 />`;
-  if (source.includes(oldBlock)) source = source.replace(oldBlock, newBlock);
-}
 
-// Verify the old top search is truly gone and the lower working search exists.
-if (source.includes("folderFileSearch")) {
-  throw new Error("Old top/broken folder search still exists after cleanup");
-}
-if (!source.includes("function FolderSearchableFileList({")) {
-  throw new Error("Working lower folder search is missing");
+if (!source.includes(oldBlock)) throw new Error("Could not locate selected-folder file list");
+source = source.replace(oldBlock, newBlock);
+
+// Hard build guard. If anything ever creates a second folder search again,
+// deployment fails instead of shipping a broken/duplicate UI.
+const placeholders = source.match(/placeholder="Search files in this folder\.\.\."/g) || [];
+const components = source.match(/function FolderSearchableFileList\(\{/g) || [];
+const usages = source.match(/<FolderSearchableFileList/g) || [];
+if (placeholders.length !== 1 || components.length !== 1 || usages.length !== 1) {
+  throw new Error(`Folder search invariant failed: placeholders=${placeholders.length}, components=${components.length}, usages=${usages.length}`);
 }
 
 fs.writeFileSync(filePath, source);
-console.log("Removed top broken folder search; kept lower working folder search only.");
+console.log("Exactly one working folder search bar generated.");
