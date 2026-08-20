@@ -4,9 +4,9 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "node scripts/patch-ai-import.mjs && node scripts/patch-no-ai-rename.mjs && node scripts/patch-docx-preview.mjs && node scripts/patch-doc-preview.mjs && node scripts/patch-folder-move-stability.mjs && node scripts/patch-folder-search-react.mjs && node scripts/patch-move-folders-alphabetical.mjs && node scripts/patch-folder-delete-safety.mjs && node scripts/patch-disable-case-ai.mjs && vite",
-    "build": "node scripts/patch-ai-import.mjs && node scripts/patch-no-ai-rename.mjs && node scripts/patch-docx-preview.mjs && node scripts/patch-doc-preview.mjs && node scripts/patch-folder-move-stability.mjs && node scripts/patch-folder-search-react.mjs && node scripts/patch-move-folders-alphabetical.mjs && node scripts/patch-folder-delete-safety.mjs && node scripts/patch-disable-case-ai.mjs && vite build",
-    "build:dev": "node scripts/patch-ai-import.mjs && node scripts/patch-no-ai-rename.mjs && node scripts/patch-docx-preview.mjs && node scripts/patch-doc-preview.mjs && node scripts/patch-folder-move-stability.mjs && node scripts/patch-folder-search-react.mjs && node scripts/patch-move-folders-alphabetical.mjs && node scripts/patch-folder-delete-safety.mjs && node scripts/patch-disable-case-ai.mjs && vite build --mode development",
+    "dev": "node scripts/patch-ai-import.mjs && node scripts/patch-no-ai-rename.mjs && node scripts/patch-docx-preview.mjs && node scripts/patch-doc-preview.mjs && node scripts/patch-folder-move-stability.mjs && node scripts/patch-folder-search-react.mjs && node scripts/patch-move-folders-alphabetical.mjs && node scripts/patch-folder-delete-safety.mjs && node scripts/patch-undo-timeout.mjs && node scripts/patch-disable-case-ai.mjs && vite",
+    "build": "node scripts/patch-ai-import.mjs && node scripts/patch-no-ai-rename.mjs && node scripts/patch-docx-preview.mjs && node scripts/patch-doc-preview.mjs && node scripts/patch-folder-move-stability.mjs && node scripts/patch-folder-search-react.mjs && node scripts/patch-move-folders-alphabetical.mjs && node scripts/patch-folder-delete-safety.mjs && node scripts/patch-undo-timeout.mjs && node scripts/patch-disable-case-ai.mjs && vite build",
+    "build:dev": "node scripts/patch-ai-import.mjs && node scripts/patch-no-ai-rename.mjs && node scripts/patch-docx-preview.mjs && node scripts/patch-doc-preview.mjs && node scripts/patch-folder-move-stability.mjs && node scripts/patch-folder-search-react.mjs && node scripts/patch-move-folders-alphabetical.mjs && node scripts/patch-folder-delete-safety.mjs && node scripts/patch-undo-timeout.mjs && node scripts/patch-disable-case-ai.mjs && vite build --mode development",
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
@@ -69,7 +69,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.32.0",
-    "@tailwindcss/typography": "^0.5.16",
+    "@tailwindcss/typography": "^1.0.5",
     "@testing-library/jest-dom": "^6.6.0",
     "@testing-library/react": "^16.0.0",
     "@types/node": "^22.16.5",
