@@ -101,38 +101,81 @@ export async function moveFiles(
   ids: string[],
   destinationFolderId: string | null,
 ) {
-  if (ids.length === 0) return { data: [] as Array<Pick<FileRow, "id" | "folder_id" | "is_extra_file">>, error: null };
+  if (ids.length === 0) {
+    return {
+      data: [] as Array<Pick<FileRow, "id" | "folder_id" | "is_extra_file">>,
+      error: null,
+    };
+  }
 
-  const { data, error } = await supabase
+  const expectedExtra = destinationFolderId === null;
+  const updatedAt = new Date().toISOString();
+
+  const { error: updateError } = await supabase
     .from("files")
     .update({
       folder_id: destinationFolderId,
-      is_extra_file: destinationFolderId === null,
-      updated_at: new Date().toISOString(),
+      is_extra_file: expectedExtra,
+      updated_at: updatedAt,
     })
-    .in("id", ids)
-    .select("id, folder_id, is_extra_file");
+    .in("id", ids);
 
-  if (error) return { data: null, error };
+  if (updateError) return { data: null, error: updateError };
 
-  const updated = data || [];
-  if (updated.length !== ids.length) {
+  // Read the rows back from Supabase after the write. This verifies the move is
+  // actually persisted, not just reflected optimistically in the browser.
+  const verify = async () =>
+    supabase
+      .from("files")
+      .select("id, folder_id, is_extra_file")
+      .in("id", ids)
+      .is("deleted_at", null);
+
+  let { data: verified, error: verifyError } = await verify();
+  if (verifyError) return { data: null, error: verifyError };
+
+  const isCorrect = (rows: typeof verified) => {
+    if (!rows || rows.length !== ids.length) return false;
+    const returnedIds = new Set(rows.map((row) => row.id));
+    if (ids.some((id) => !returnedIds.has(id))) return false;
+    return rows.every(
+      (row) =>
+        row.folder_id === destinationFolderId &&
+        Boolean(row.is_extra_file) === expectedExtra,
+    );
+  };
+
+  // One retry protects against an edge case where a stale response is returned
+  // immediately after the update. We do not report success until a fresh read
+  // confirms the destination that will be seen after refresh.
+  if (!isCorrect(verified)) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    const retry = await supabase
+      .from("files")
+      .update({
+        folder_id: destinationFolderId,
+        is_extra_file: expectedExtra,
+        updated_at: new Date().toISOString(),
+      })
+      .in("id", ids);
+
+    if (retry.error) return { data: null, error: retry.error };
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const secondVerify = await verify();
+    verified = secondVerify.data;
+    verifyError = secondVerify.error;
+    if (verifyError) return { data: null, error: verifyError };
+  }
+
+  if (!isCorrect(verified)) {
     return {
-      data: updated,
-      error: new Error(`Only ${updated.length} of ${ids.length} files were moved. Nothing was changed on screen so you can retry safely.`),
+      data: verified || [],
+      error: new Error(
+        "The move did not persist in the database. The file was left in place so it will not jump back after refresh.",
+      ),
     };
   }
 
-  const wrongDestination = updated.some(
-    (row) => row.folder_id !== destinationFolderId || Boolean(row.is_extra_file) !== (destinationFolderId === null),
-  );
-
-  if (wrongDestination) {
-    return {
-      data: updated,
-      error: new Error("The database did not save the requested destination for every file. Please retry."),
-    };
-  }
-
-  return { data: updated, error: null };
+  return { data: verified || [], error: null };
 }
