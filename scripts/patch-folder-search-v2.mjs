@@ -3,6 +3,15 @@ import fs from "node:fs";
 const filePath = "src/pages/Home.tsx";
 let source = fs.readFileSync(filePath, "utf8");
 
+// The original folder-search patch may already be baked into Home.tsx from an
+// earlier successful build. If so, keep that single search UI and do not add a
+// second component-level search bar.
+if (source.includes('placeholder="Search files in this folder..."')) {
+  console.log("Folder search already exists; leaving the single existing search bar in place.");
+  fs.writeFileSync(filePath, source);
+  process.exit(0);
+}
+
 const marker = "function FileList({";
 if (!source.includes(marker)) {
   throw new Error("Could not locate FileList in Home.tsx");
@@ -41,21 +50,12 @@ if (!source.includes("function FolderSearchableFileList({")) {
           className="w-full bg-transparent outline-none"
         />
         {query && (
-          <button
-            type="button"
-            onClick={() => setQuery("")}
-            className="rounded-lg p-1 text-slate-500 hover:bg-slate-200 hover:text-slate-950"
-            aria-label="Clear folder search"
-          >
+          <button type="button" onClick={() => setQuery("")} className="rounded-lg p-1 text-slate-500 hover:bg-slate-200 hover:text-slate-950" aria-label="Clear folder search">
             <X className="h-4 w-4" />
           </button>
         )}
       </div>
-      {normalized && (
-        <p className="mb-3 text-xs font-bold text-slate-500">
-          {filteredFiles.length} of {files.length} files match “{query}”
-        </p>
-      )}
+      {normalized && <p className="mb-3 text-xs font-bold text-slate-500">{filteredFiles.length} of {files.length} files match “{query}”</p>}
       <FileList
         files={filteredFiles}
         emptyText={normalized ? "No matching files found in this folder." : "No files uploaded in this folder yet."}
@@ -89,27 +89,8 @@ const oldBlock = `                <FileList
                   }
                 />`;
 
-const newBlock = `                <FolderSearchableFileList
-                  key={selectedFolder.id}
-                  files={selectedFolder.files}
-                  onDelete={deleteFolderFile}
-                  onRename={renameFile}
-                  onPreview={handlePreviewFile}
-                  selectedFileIds={selectedFileIds}
-                  onToggleSelected={(fileId) =>
-                    setSelectedFileIds((current) =>
-                      current.includes(fileId)
-                        ? current.filter((id) => id !== fileId)
-                        : [...current, fileId],
-                    )
-                  }
-                />`;
-
-if (source.includes(oldBlock)) {
-  source = source.replace(oldBlock, newBlock);
-} else if (!source.includes("<FolderSearchableFileList")) {
-  throw new Error("Could not locate folder FileList block in Home.tsx");
-}
+const newBlock = oldBlock.replace('<FileList', '<FolderSearchableFileList').replace('\n                  emptyText="No files uploaded in this folder yet."', '');
+if (source.includes(oldBlock)) source = source.replace(oldBlock, newBlock);
 
 fs.writeFileSync(filePath, source);
-console.log("Stable folder search patch applied.");
+console.log("Stable single folder search patch applied.");
