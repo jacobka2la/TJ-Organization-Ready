@@ -1,6 +1,7 @@
 import { supabase } from "@/lib/supabase";
 
 const BUCKET = "client-files";
+const FILE_PAGE_SIZE = 500;
 
 export type FileRow = {
   id: string;
@@ -17,11 +18,27 @@ export type FileRow = {
 };
 
 export async function getFiles() {
-  return supabase
-    .from("files")
-    .select("*")
-    .is("deleted_at", null)
-    .order("created_at", { ascending: false });
+  const allFiles: FileRow[] = [];
+  let from = 0;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from("files")
+      .select("*")
+      .is("deleted_at", null)
+      .order("created_at", { ascending: false })
+      .range(from, from + FILE_PAGE_SIZE - 1);
+
+    if (error) return { data: null, error };
+
+    const page = (data || []) as FileRow[];
+    allFiles.push(...page);
+
+    if (page.length < FILE_PAGE_SIZE) break;
+    from += FILE_PAGE_SIZE;
+  }
+
+  return { data: allFiles, error: null };
 }
 
 export async function uploadClientFile(input: {
@@ -122,8 +139,6 @@ export async function moveFiles(
 
   if (updateError) return { data: null, error: updateError };
 
-  // Read the rows back from Supabase after the write. This verifies the move is
-  // actually persisted, not just reflected optimistically in the browser.
   const verify = async () =>
     supabase
       .from("files")
@@ -145,9 +160,6 @@ export async function moveFiles(
     );
   };
 
-  // One retry protects against an edge case where a stale response is returned
-  // immediately after the update. We do not report success until a fresh read
-  // confirms the destination that will be seen after refresh.
   if (!isCorrect(verified)) {
     await new Promise((resolve) => setTimeout(resolve, 250));
     const retry = await supabase
