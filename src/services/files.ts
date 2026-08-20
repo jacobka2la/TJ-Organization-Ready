@@ -58,9 +58,6 @@ export async function uploadClientFile(input: {
     .select()
     .single();
 
-  // Return as soon as the upload + database record are saved so the file
-  // appears in the client folder immediately. CaseAI handles searchable PDF
-  // indexing separately in the background when it sees an unindexed PDF.
   return insertResult;
 }
 
@@ -104,16 +101,38 @@ export async function moveFiles(
   ids: string[],
   destinationFolderId: string | null,
 ) {
-  if (ids.length === 0) return { error: null };
+  if (ids.length === 0) return { data: [] as Array<Pick<FileRow, "id" | "folder_id" | "is_extra_file">>, error: null };
 
-  const { error } = await supabase
+  const { data, error } = await supabase
     .from("files")
     .update({
       folder_id: destinationFolderId,
       is_extra_file: destinationFolderId === null,
       updated_at: new Date().toISOString(),
     })
-    .in("id", ids);
+    .in("id", ids)
+    .select("id, folder_id, is_extra_file");
 
-  return { error };
+  if (error) return { data: null, error };
+
+  const updated = data || [];
+  if (updated.length !== ids.length) {
+    return {
+      data: updated,
+      error: new Error(`Only ${updated.length} of ${ids.length} files were moved. Nothing was changed on screen so you can retry safely.`),
+    };
+  }
+
+  const wrongDestination = updated.some(
+    (row) => row.folder_id !== destinationFolderId || Boolean(row.is_extra_file) !== (destinationFolderId === null),
+  );
+
+  if (wrongDestination) {
+    return {
+      data: updated,
+      error: new Error("The database did not save the requested destination for every file. Please retry."),
+    };
+  }
+
+  return { data: updated, error: null };
 }
