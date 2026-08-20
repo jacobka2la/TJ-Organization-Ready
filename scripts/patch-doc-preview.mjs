@@ -24,5 +24,13 @@ if (!source.includes('Legacy Word preview uses Microsoft Office')) {
   );
 }
 
+// Signed Supabase URLs are cross-origin, so browsers can ignore the HTML
+// download attribute and navigate the current tab. Force file actions into a
+// new tab so TJ Organization always stays open.
+source = source.replace(
+  /href=\{file\.dataUrl\}\s*\n\s*download=\{file\.name\}/g,
+  'href={file.dataUrl}\n                target="_blank"\n                rel="noreferrer"\n                download={file.name}',
+);
+
 fs.writeFileSync(filePath, source);
-console.log("Legacy DOC preview patch applied.");
+console.log("Legacy DOC preview + new-tab file downloads applied.");
