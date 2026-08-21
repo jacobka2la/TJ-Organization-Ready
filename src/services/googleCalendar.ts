@@ -4,6 +4,10 @@ type GoogleCalendarStatus = {
   connected: boolean;
 };
 
+type GoogleCalendarSyncResult = {
+  synced: number;
+};
+
 export async function getGoogleCalendarStatus() {
   const { data, error } = await supabase.functions.invoke<GoogleCalendarStatus>(
     "google-calendar-status",
@@ -24,4 +28,13 @@ export async function connectGoogleCalendar() {
   }
 
   return data.url;
+}
+
+export async function syncGoogleCalendar() {
+  const { data, error } = await supabase.functions.invoke<GoogleCalendarSyncResult>(
+    "google-calendar-sync",
+  );
+
+  if (error) throw error;
+  return { synced: data?.synced ?? 0 };
 }
