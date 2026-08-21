@@ -8,7 +8,9 @@ export async function getGoogleCalendarStatus() {
   const { data, error } = await supabase.functions.invoke<GoogleCalendarStatus>(
     "google-calendar-status",
   );
-  return { data, error };
+
+  if (error) throw error;
+  return { connected: Boolean(data?.connected) };
 }
 
 export async function connectGoogleCalendar() {
@@ -16,11 +18,10 @@ export async function connectGoogleCalendar() {
     "google-calendar-connect",
   );
 
-  if (error) return { data: null, error };
+  if (error) throw error;
   if (!data?.url) {
-    return { data: null, error: new Error("Google Calendar authorization URL was not returned.") };
+    throw new Error("Google Calendar authorization URL was not returned.");
   }
 
-  window.location.assign(data.url);
-  return { data, error: null };
+  return data.url;
 }
