@@ -3,6 +3,19 @@ import { supabase } from "@/lib/supabase";
 const BUCKET = "client-files";
 const FILE_PAGE_SIZE = 500;
 
+const isIgnoredUploadFile = (file: File) => {
+  const name = file.name.trim();
+  const lower = name.toLowerCase();
+
+  return (
+    name.startsWith("~$") ||
+    lower === ".ds_store" ||
+    lower === "thumbs.db" ||
+    lower === "desktop.ini" ||
+    lower.startsWith("._")
+  );
+};
+
 export type FileRow = {
   id: string;
   client_id: string;
@@ -47,6 +60,14 @@ export async function uploadClientFile(input: {
   file: File;
   isExtraFile?: boolean;
 }) {
+  if (isIgnoredUploadFile(input.file)) {
+    return {
+      data: null,
+      error: null,
+      skipped: true,
+    };
+  }
+
   const safeName = input.file.name.replace(/[^a-zA-Z0-9._-]/g, "_");
   const folderPart = input.isExtraFile
     ? "extra-files"
@@ -58,7 +79,7 @@ export async function uploadClientFile(input: {
     .upload(path, input.file, { upsert: false });
 
   if (uploadResult.error) {
-    return { data: null, error: uploadResult.error };
+    return { data: null, error: uploadResult.error, skipped: false };
   }
 
   const insertResult = await supabase
@@ -75,7 +96,7 @@ export async function uploadClientFile(input: {
     .select()
     .single();
 
-  return insertResult;
+  return { ...insertResult, skipped: false };
 }
 
 export async function getSignedFileUrl(storagePath: string) {
