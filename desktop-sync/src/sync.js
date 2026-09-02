@@ -159,10 +159,14 @@ function manifestFileAt(manifest, relativePath) {
 async function uploadNewLocalFile(root, fullPath, manifestPath, manifest, supabase) {
   const relativePath = rel(root, fullPath);
   const parts = relativePath.split('/');
-  if (parts.length < 3) return;
+  // A file dropped directly into a client's root folder is a catch-all file.
+  // Treat it the same as a file placed in the visible "Extra Files" folder so
+  // dragging a document from File Explorer's sidebar immediately reaches the
+  // client's Extra Files section on the website.
+  if (parts.length < 2) return;
   const clientId = findClientByRel(manifest, parts);
   if (!clientId) return;
-  const isExtra = parts[1] === 'Extra Files';
+  const isExtra = parts.length === 2 || parts[1] === 'Extra Files';
   const folderId = isExtra ? null : findFolderByRel(manifest, parts);
   if (!isExtra && !folderId) return;
 
