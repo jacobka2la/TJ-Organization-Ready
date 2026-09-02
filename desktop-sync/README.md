@@ -10,6 +10,7 @@ This is the desktop companion for TJ Organization. It creates a normal `TJ Organ
 - Files uploaded on the website download to the computer.
 - Website file renames/moves are reflected locally on the next pull.
 - Files added locally inside an existing client folder upload to TJ Organization.
+- Files dropped directly into a client's main folder upload to that client's `Extra Files` section.
 - Local file edits replace the matching Supabase Storage object and update file metadata.
 - Local file deletes soft-delete the matching `files` row.
 - New local folders directly inside an existing client create a TJ Organization folder.
