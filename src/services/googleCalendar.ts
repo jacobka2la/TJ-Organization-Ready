@@ -8,21 +8,40 @@ type GoogleCalendarSyncResult = {
   synced: number;
 };
 
+async function invokeAuthenticated<T>(functionName: string) {
+  const {
+    data: { session },
+    error: sessionError,
+  } = await supabase.auth.getSession();
+
+  if (sessionError) throw sessionError;
+  if (!session) {
+    throw new Error("Your session expired. Please log in again.");
+  }
+
+  const { data, error } = await supabase.functions.invoke<T>(functionName, {
+    headers: {
+      Authorization: `Bearer ${session.access_token}`,
+    },
+  });
+
+  if (error) throw error;
+  return data;
+}
+
 export async function getGoogleCalendarStatus() {
-  const { data, error } = await supabase.functions.invoke<GoogleCalendarStatus>(
+  const data = await invokeAuthenticated<GoogleCalendarStatus>(
     "google-calendar-status",
   );
 
-  if (error) throw error;
   return { connected: Boolean(data?.connected) };
 }
 
 export async function connectGoogleCalendar() {
-  const { data, error } = await supabase.functions.invoke<{ url: string }>(
+  const data = await invokeAuthenticated<{ url: string }>(
     "google-calendar-connect",
   );
 
-  if (error) throw error;
   if (!data?.url) {
     throw new Error("Google Calendar authorization URL was not returned.");
   }
@@ -31,10 +50,9 @@ export async function connectGoogleCalendar() {
 }
 
 export async function syncGoogleCalendar() {
-  const { data, error } = await supabase.functions.invoke<GoogleCalendarSyncResult>(
+  const data = await invokeAuthenticated<GoogleCalendarSyncResult>(
     "google-calendar-sync",
   );
 
-  if (error) throw error;
   return { synced: data?.synced ?? 0 };
 }
